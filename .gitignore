@@ -1,3 +1,10 @@
+<<<<<<< HEAD
+*.pyc
+*.exe
+*.pdb
+*.ilk
+=======
+<<<<<<< HEAD
 *.pyc
 *.exe
 *.pdb
@@ -15,8 +22,31 @@ TAGS
 /doc/manual.html
 /doc/doxygen
 /gtest-1.6.0
+=======
+*.pyc
+*.exe
+>>>>>>> minor gitignore update
+TAGS
+/build
+/build.ninja
+/ninja
+/build_log_perftest
+/canon_perftest
+/hash_collision_bench
+/ninja_test
+/parser_perftest
+/graph.png
+/doc/manual.html
+/doc/doxygen
+/gtest-1.6.0
+<<<<<<< HEAD
 
 # Eclipse project files
 .project
 .cproject
 
+=======
+ninja.bootstrap
+
+>>>>>>> minor gitignore update
+>>>>>>> minor gitignore update
