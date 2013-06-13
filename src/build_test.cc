@@ -1602,3 +1602,151 @@ TEST_F(BuildWithDepsLogTest, DepsIgnoredInDryRun) {
 
   builder.command_runner_.release();
 }
+
+/// Check that a restat rule generating a header cancels compilations correctly.
+TEST_F(BuildTest, RestatDepfileDependency) {
+  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
+"rule true\n"
+"  command = true\n"  // Would be "write if out-of-date" in reality.
+"  restat = 1\n"
+"build header.h: true header.in\n"
+"build out: cat in1\n"
+"  depfile = in1.d\n"));
+
+  fs_.Create("header.h", "");
+  fs_.Create("in1.d", "out: header.h");
+  fs_.Tick();
+  fs_.Create("header.in", "");
+
+  string err;
+  EXPECT_TRUE(builder_.AddTarget("out", &err));
+  ASSERT_EQ("", err);
+  EXPECT_TRUE(builder_.Build(&err));
+  EXPECT_EQ("", err);
+}
+
+/// Check that a restat rule generating a header cancels compilations correctly,
+/// depslog case.
+TEST_F(BuildWithDepsLogTest, RestatDepfileDependencyDepsLog) {
+  string err;
+  // Note: in1 was created by the superclass SetUp().
+  const char* manifest =
+      "rule true\n"
+      "  command = true\n"  // Would be "write if out-of-date" in reality.
+      "  restat = 1\n"
+      "build header.h: true header.in\n"
+      "build out: cat in1\n"
+      "  deps = gcc\n"
+      "  depfile = in1.d\n";
+  {
+    State state;
+    ASSERT_NO_FATAL_FAILURE(AddCatRule(&state));
+    ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
+
+    // Run the build once, everything should be ok.
+    DepsLog deps_log;
+    ASSERT_TRUE(deps_log.OpenForWrite("ninja_deps", &err));
+    ASSERT_EQ("", err);
+
+    Builder builder(&state, config_, NULL, &deps_log, &fs_);
+    builder.command_runner_.reset(&command_runner_);
+    EXPECT_TRUE(builder.AddTarget("out", &err));
+    ASSERT_EQ("", err);
+    fs_.Create("in1.d", "out: header.h");
+    EXPECT_TRUE(builder.Build(&err));
+    EXPECT_EQ("", err);
+
+    deps_log.Close();
+    builder.command_runner_.release();
+  }
+
+  {
+    State state;
+    ASSERT_NO_FATAL_FAILURE(AddCatRule(&state));
+    ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
+
+    // Touch the input of the restat rule.
+    fs_.Tick();
+    fs_.Create("header.in", "");
+
+    // Run the build again.
+    DepsLog deps_log;
+    ASSERT_TRUE(deps_log.Load("ninja_deps", &state, &err));
+    ASSERT_TRUE(deps_log.OpenForWrite("ninja_deps", &err));
+
+    Builder builder(&state, config_, NULL, &deps_log, &fs_);
+    builder.command_runner_.reset(&command_runner_);
+    command_runner_.commands_ran_.clear();
+    EXPECT_TRUE(builder.AddTarget("out", &err));
+    ASSERT_EQ("", err);
+    EXPECT_TRUE(builder.Build(&err));
+    EXPECT_EQ("", err);
+
+    // Rule "true" should have run again, but the build of "out" should have
+    // been cancelled due to restat propagating through the depfile header.
+    EXPECT_EQ(1u, command_runner_.commands_ran_.size());
+
+    builder.command_runner_.release();
+  }
+}
+
+TEST_F(BuildWithDepsLogTest, DepFileOKDepsLog) {
+  string err;
+  const char* manifest =
+      "rule cc\n  command = cc $in\n  depfile = $out.d\n  deps = gcc\n"
+      "build foo.o: cc foo.c\n";
+
+  fs_.Create("foo.c", "");
+
+  {
+    State state;
+    ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
+
+    // Run the build once, everything should be ok.
+    DepsLog deps_log;
+    ASSERT_TRUE(deps_log.OpenForWrite("ninja_deps", &err));
+    ASSERT_EQ("", err);
+
+    Builder builder(&state, config_, NULL, &deps_log, &fs_);
+    builder.command_runner_.reset(&command_runner_);
+    EXPECT_TRUE(builder.AddTarget("foo.o", &err));
+    ASSERT_EQ("", err);
+    fs_.Create("foo.o.d", "foo.o: blah.h bar.h\n");
+    EXPECT_TRUE(builder.Build(&err));
+    EXPECT_EQ("", err);
+
+    deps_log.Close();
+    builder.command_runner_.release();
+  }
+
+  {
+    State state;
+    ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
+
+    DepsLog deps_log;
+    ASSERT_TRUE(deps_log.Load("ninja_deps", &state, &err));
+    ASSERT_TRUE(deps_log.OpenForWrite("ninja_deps", &err));
+    ASSERT_EQ("", err);
+
+    Builder builder(&state, config_, NULL, &deps_log, &fs_);
+    builder.command_runner_.reset(&command_runner_);
+
+    Edge* edge = state.edges_.back();
+
+    state.GetNode("bar.h")->MarkDirty();  // Mark bar.h as missing.
+    EXPECT_TRUE(builder.AddTarget("foo.o", &err));
+    ASSERT_EQ("", err);
+
+    // Expect three new edges: one generating foo.o, and two more from
+    // loading the depfile.
+    ASSERT_EQ(3, (int)state.edges_.size());
+    // Expect our edge to now have three inputs: foo.c and two headers.
+    ASSERT_EQ(3u, edge->inputs_.size());
+
+    // Expect the command line we generate to only use the original input.
+    ASSERT_EQ("cc foo.c", edge->EvaluateCommand());
+
+    deps_log.Close();
+    builder.command_runner_.release();
+  }
+}
