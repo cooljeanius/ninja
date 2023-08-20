@@ -17,7 +17,6 @@
 
 #include <string>
 #include <vector>
-using namespace std;
 
 #include "util.h"  // For int64_t.
 
@@ -26,13 +25,12 @@ using namespace std;
 
 /// A single metrics we're tracking, like "depfile load time".
 struct Metric {
-  string name;
+  std::string name;
   /// Number of times we've hit the code path.
   int count;
-  /// Total time (in micros) we've spent on the code path.
+  /// Total time (in platform-dependent units) we've spent on the code path.
   int64_t sum;
 };
-
 
 /// A scoped object for recording a metric across the body of a function.
 /// Used by the METRIC_RECORD macro.
@@ -49,13 +47,13 @@ private:
 
 /// The singleton that stores metrics and prints the report.
 struct Metrics {
-  Metric* NewMetric(const string& name);
+  Metric* NewMetric(const std::string& name);
 
   /// Print a summary report to stdout.
   void Report();
 
 private:
-  vector<Metric*> metrics_;
+  std::vector<Metric*> metrics_;
 };
 
 /// Get the current time as relative to some epoch.
@@ -69,15 +67,15 @@ struct Stopwatch {
   Stopwatch() : started_(0) {}
 
   /// Seconds since Restart() call.
-  double Elapsed() const {
-    return 1e-6 * static_cast<double>(Now() - started_);
-  }
+  double Elapsed() const;
 
-  void Restart() { started_ = Now(); }
+  void Restart() { started_ = NowRaw(); }
 
  private:
   uint64_t started_;
-  uint64_t Now() const;
+  // Return the current time using the native frequency of the high resolution
+  // timer.
+  uint64_t NowRaw() const;
 };
 
 /// The primary interface to metrics.  Use METRIC_RECORD("foobar") at the top

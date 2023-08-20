@@ -4,7 +4,7 @@ Version: %{ver}
 Release: %{rel}%{?dist}
 Group: Development/Tools
 License: Apache 2.0
-URL: https://github.com/martine/ninja
+URL: https://github.com/ninja-build/ninja
 Source0: %{name}-%{version}-%{rel}.tar.gz
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{rel}
 
@@ -23,7 +23,7 @@ seconds to start building after changing one file. Ninja is under a second.
 
 %build
 echo Building..
-./bootstrap.py
+./configure.py --bootstrap
 ./ninja manual
 
 %install
@@ -32,7 +32,7 @@ cp -p ninja %{buildroot}%{_bindir}/
 
 %files
 %defattr(-, root, root)
-%doc COPYING README doc/manual.html
+%doc COPYING README.md doc/manual.html
 %{_bindir}/*
 
 %clean

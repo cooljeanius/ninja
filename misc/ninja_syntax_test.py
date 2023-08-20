@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Copyright 2011 Google Inc. All Rights Reserved.
 #
@@ -45,8 +45,14 @@ class TestLineWordWrap(unittest.TestCase):
                                       INDENT + 'y']) + '\n',
                          self.out.getvalue())
 
+    def test_comment_wrap(self):
+        # Filenames should not be wrapped
+        self.n.comment('Hello /usr/local/build-tools/bin')
+        self.assertEqual('# Hello\n# /usr/local/build-tools/bin\n',
+                         self.out.getvalue())
+
     def test_short_words_indented(self):
-        # Test that indent is taking into acount when breaking subsequent lines.
+        # Test that indent is taking into account when breaking subsequent lines.
         # The second line should not be '    to tree', as that's longer than the
         # test layout width of 8.
         self.n._line('line_one to tree')
@@ -147,6 +153,39 @@ build out: cc in
   name = value
 ''',
                          self.out.getvalue())
+
+    def test_implicit_outputs(self):
+        self.n.build('o', 'cc', 'i', implicit_outputs='io')
+        self.assertEqual('''\
+build o | io: cc i
+''',
+                         self.out.getvalue())
+
+class TestExpand(unittest.TestCase):
+    def test_basic(self):
+        vars = {'x': 'X'}
+        self.assertEqual('foo', ninja_syntax.expand('foo', vars))
+
+    def test_var(self):
+        vars = {'xyz': 'XYZ'}
+        self.assertEqual('fooXYZ', ninja_syntax.expand('foo$xyz', vars))
+
+    def test_vars(self):
+        vars = {'x': 'X', 'y': 'YYY'}
+        self.assertEqual('XYYY', ninja_syntax.expand('$x$y', vars))
+
+    def test_space(self):
+        vars = {}
+        self.assertEqual('x y z', ninja_syntax.expand('x$ y$ z', vars))
+
+    def test_locals(self):
+        vars = {'x': 'a'}
+        local_vars = {'x': 'b'}
+        self.assertEqual('a', ninja_syntax.expand('$x', vars))
+        self.assertEqual('b', ninja_syntax.expand('$x', vars, local_vars))
+
+    def test_double(self):
+        self.assertEqual('a b$c', ninja_syntax.expand('a$ b$$c', {}))
 
 if __name__ == '__main__':
     unittest.main()

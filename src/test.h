@@ -15,13 +15,96 @@
 #ifndef NINJA_TEST_H_
 #define NINJA_TEST_H_
 
-#include <gtest/gtest.h>
-
 #include "disk_interface.h"
+#include "manifest_parser.h"
 #include "state.h"
 #include "util.h"
 
-// Support utilites for tests.
+// A tiny testing framework inspired by googletest, but much simpler and
+// faster to compile. It supports most things commonly used from googltest. The
+// most noticeable things missing: EXPECT_* and ASSERT_* don't support
+// streaming notes to them with operator<<, and for failing tests the lhs and
+// rhs are not printed. That's so that this header does not have to include
+// sstream, which slows down building ninja_test almost 20%.
+namespace testing {
+class Test {
+  bool failed_;
+  int assertion_failures_;
+ public:
+  Test() : failed_(false), assertion_failures_(0) {}
+  virtual ~Test() {}
+  virtual void SetUp() {}
+  virtual void TearDown() {}
+  virtual void Run() = 0;
+
+  bool Failed() const { return failed_; }
+  int AssertionFailures() const { return assertion_failures_; }
+  void AddAssertionFailure() { assertion_failures_++; }
+  bool Check(bool condition, const char* file, int line, const char* error);
+};
+}
+
+void RegisterTest(testing::Test* (*)(), const char*);
+
+extern testing::Test* g_current_test;
+#define TEST_F_(x, y, name)                                           \
+  struct y : public x {                                               \
+    static testing::Test* Create() { return g_current_test = new y; } \
+    virtual void Run();                                               \
+  };                                                                  \
+  struct Register##y {                                                \
+    Register##y() { RegisterTest(y::Create, name); }                  \
+  };                                                                  \
+  Register##y g_register_##y;                                         \
+  void y::Run()
+
+#define TEST_F(x, y) TEST_F_(x, x##y, #x "." #y)
+#define TEST(x, y) TEST_F_(testing::Test, x##y, #x "." #y)
+
+#define EXPECT_EQ(a, b) \
+  g_current_test->Check(a == b, __FILE__, __LINE__, #a " == " #b)
+#define EXPECT_NE(a, b) \
+  g_current_test->Check(a != b, __FILE__, __LINE__, #a " != " #b)
+#define EXPECT_GT(a, b) \
+  g_current_test->Check(a > b, __FILE__, __LINE__, #a " > " #b)
+#define EXPECT_LT(a, b) \
+  g_current_test->Check(a < b, __FILE__, __LINE__, #a " < " #b)
+#define EXPECT_GE(a, b) \
+  g_current_test->Check(a >= b, __FILE__, __LINE__, #a " >= " #b)
+#define EXPECT_LE(a, b) \
+  g_current_test->Check(a <= b, __FILE__, __LINE__, #a " <= " #b)
+#define EXPECT_TRUE(a) \
+  g_current_test->Check(static_cast<bool>(a), __FILE__, __LINE__, #a)
+#define EXPECT_FALSE(a) \
+  g_current_test->Check(!static_cast<bool>(a), __FILE__, __LINE__, #a)
+
+#define ASSERT_EQ(a, b) \
+  if (!EXPECT_EQ(a, b)) { g_current_test->AddAssertionFailure(); return; }
+#define ASSERT_NE(a, b) \
+  if (!EXPECT_NE(a, b)) { g_current_test->AddAssertionFailure(); return; }
+#define ASSERT_GT(a, b) \
+  if (!EXPECT_GT(a, b)) { g_current_test->AddAssertionFailure(); return; }
+#define ASSERT_LT(a, b) \
+  if (!EXPECT_LT(a, b)) { g_current_test->AddAssertionFailure(); return; }
+#define ASSERT_GE(a, b) \
+  if (!EXPECT_GE(a, b)) { g_current_test->AddAssertionFailure(); return; }
+#define ASSERT_LE(a, b) \
+  if (!EXPECT_LE(a, b)) { g_current_test->AddAssertionFailure(); return; }
+#define ASSERT_TRUE(a)  \
+  if (!EXPECT_TRUE(a))  { g_current_test->AddAssertionFailure(); return; }
+#define ASSERT_FALSE(a) \
+  if (!EXPECT_FALSE(a)) { g_current_test->AddAssertionFailure(); return; }
+#define ASSERT_NO_FATAL_FAILURE(a)                           \
+  {                                                          \
+    int fail_count = g_current_test->AssertionFailures();    \
+    a;                                                       \
+    if (fail_count != g_current_test->AssertionFailures()) { \
+      g_current_test->AddAssertionFailure();                 \
+      return;                                                \
+    }                                                        \
+  }
+
+// Support utilities for tests.
 
 struct Node;
 
@@ -35,13 +118,15 @@ struct StateTestWithBuiltinRules : public testing::Test {
   void AddCatRule(State* state);
 
   /// Short way to get a Node by its path from state_.
-  Node* GetNode(const string& path);
+  Node* GetNode(const std::string& path);
 
   State state_;
 };
 
-void AssertParse(State* state, const char* input);
+void AssertParse(State* state, const char* input,
+                 ManifestParserOptions = ManifestParserOptions());
 void AssertHash(const char* expected, uint64_t actual);
+void VerifyGraph(const State& state);
 
 /// An implementation of DiskInterface that uses an in-memory representation
 /// of disk state.  It also logs file accesses and directory creations
@@ -50,7 +135,7 @@ struct VirtualFileSystem : public DiskInterface {
   VirtualFileSystem() : now_(1) {}
 
   /// "Create" a file with contents.
-  void Create(const string& path, const string& contents);
+  void Create(const std::string& path, const std::string& contents);
 
   /// Tick "time" forwards; subsequent file operations will be newer than
   /// previous ones.
@@ -59,24 +144,26 @@ struct VirtualFileSystem : public DiskInterface {
   }
 
   // DiskInterface
-  virtual TimeStamp Stat(const string& path);
-  virtual bool WriteFile(const string& path, const string& contents);
-  virtual bool MakeDir(const string& path);
-  virtual string ReadFile(const string& path, string* err);
-  virtual int RemoveFile(const string& path);
+  virtual TimeStamp Stat(const std::string& path, std::string* err) const;
+  virtual bool WriteFile(const std::string& path, const std::string& contents);
+  virtual bool MakeDir(const std::string& path);
+  virtual Status ReadFile(const std::string& path, std::string* contents,
+                          std::string* err);
+  virtual int RemoveFile(const std::string& path);
 
   /// An entry for a single in-memory file.
   struct Entry {
     int mtime;
-    string contents;
+    std::string stat_error;  // If mtime is -1.
+    std::string contents;
   };
 
-  vector<string> directories_made_;
-  vector<string> files_read_;
-  typedef map<string, Entry> FileMap;
+  std::vector<std::string> directories_made_;
+  std::vector<std::string> files_read_;
+  typedef std::map<std::string, Entry> FileMap;
   FileMap files_;
-  set<string> files_removed_;
-  set<string> files_created_;
+  std::set<std::string> files_removed_;
+  std::set<std::string> files_created_;
 
   /// A simple fake timestamp for file operations.
   int now_;
@@ -84,15 +171,15 @@ struct VirtualFileSystem : public DiskInterface {
 
 struct ScopedTempDir {
   /// Create a temporary directory and chdir into it.
-  void CreateAndEnter(const string& name);
+  void CreateAndEnter(const std::string& name);
 
   /// Clean up the temporary directory.
   void Cleanup();
 
   /// The temp directory containing our dir.
-  string start_dir_;
+  std::string start_dir_;
   /// The subdirectory name for our dir, or empty if it hasn't been set up.
-  string temp_dir_name_;
+  std::string temp_dir_name_;
 };
 
 #endif // NINJA_TEST_H_

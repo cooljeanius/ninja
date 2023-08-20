@@ -22,23 +22,14 @@
 #include "state.h"
 #include "util.h"
 
-Cleaner::Cleaner(State* state, const BuildConfig& config)
-  : state_(state),
-    config_(config),
-    removed_(),
-    cleaned_(),
-    cleaned_files_count_(0),
-    disk_interface_(new RealDiskInterface),
-    status_(0) {
-}
+using namespace std;
 
 Cleaner::Cleaner(State* state,
                  const BuildConfig& config,
                  DiskInterface* disk_interface)
   : state_(state),
     config_(config),
-    removed_(),
-    cleaned_(),
+    dyndep_loader_(state, disk_interface),
     cleaned_files_count_(0),
     disk_interface_(disk_interface),
     status_(0) {
@@ -49,7 +40,11 @@ int Cleaner::RemoveFile(const string& path) {
 }
 
 bool Cleaner::FileExists(const string& path) {
-  return disk_interface_->Stat(path) > 0;
+  string err;
+  TimeStamp mtime = disk_interface_->Stat(path, &err);
+  if (mtime == -1)
+    Error("%s", err.c_str());
+  return mtime > 0;  // Treat Stat() errors as "file does not exist".
 }
 
 void Cleaner::Report(const string& path) {
@@ -80,11 +75,11 @@ bool Cleaner::IsAlreadyRemoved(const string& path) {
 }
 
 void Cleaner::RemoveEdgeFiles(Edge* edge) {
-  string depfile = edge->GetBinding("depfile");
+  string depfile = edge->GetUnescapedDepfile();
   if (!depfile.empty())
     Remove(depfile);
 
-  string rspfile = edge->GetBinding("rspfile");
+  string rspfile = edge->GetUnescapedRspfile();
   if (!rspfile.empty())
     Remove(rspfile);
 }
@@ -97,6 +92,7 @@ void Cleaner::PrintHeader() {
     printf("\n");
   else
     printf(" ");
+  fflush(stdout);
 }
 
 void Cleaner::PrintFooter() {
@@ -108,6 +104,7 @@ void Cleaner::PrintFooter() {
 int Cleaner::CleanAll(bool generator) {
   Reset();
   PrintHeader();
+  LoadDyndeps();
   for (vector<Edge*>::iterator e = state_->edges_.begin();
        e != state_->edges_.end(); ++e) {
     // Do not try to remove phony targets
@@ -122,6 +119,28 @@ int Cleaner::CleanAll(bool generator) {
     }
 
     RemoveEdgeFiles(*e);
+  }
+  PrintFooter();
+  return status_;
+}
+
+int Cleaner::CleanDead(const BuildLog::Entries& entries) {
+  Reset();
+  PrintHeader();
+  for (BuildLog::Entries::const_iterator i = entries.begin(); i != entries.end(); ++i) {
+    Node* n = state_->LookupNode(i->first);
+    // Detecting stale outputs works as follows:
+    //
+    // - If it has no Node, it is not in the build graph, or the deps log
+    //   anymore, hence is stale.
+    //
+    // - If it isn't an output or input for any edge, it comes from a stale
+    //   entry in the deps log, but no longer referenced from the build
+    //   graph.
+    //
+    if (!n || (!n->in_edge() && n->out_edges().empty())) {
+      Remove(i->first.AsString());
+    }
   }
   PrintFooter();
   return status_;
@@ -153,6 +172,7 @@ int Cleaner::CleanTarget(Node* target) {
 
   Reset();
   PrintHeader();
+  LoadDyndeps();
   DoCleanTarget(target);
   PrintFooter();
   return status_;
@@ -175,15 +195,23 @@ int Cleaner::CleanTarget(const char* target) {
 int Cleaner::CleanTargets(int target_count, char* targets[]) {
   Reset();
   PrintHeader();
+  LoadDyndeps();
   for (int i = 0; i < target_count; ++i) {
-    const char* target_name = targets[i];
+    string target_name = targets[i];
+    if (target_name.empty()) {
+      Error("failed to canonicalize '': empty path");
+      status_ = 1;
+      continue;
+    }
+    uint64_t slash_bits;
+    CanonicalizePath(&target_name, &slash_bits);
     Node* target = state_->LookupNode(target_name);
     if (target) {
       if (IsVerbose())
-        printf("Target %s\n", target_name);
+        printf("Target %s\n", target_name.c_str());
       DoCleanTarget(target);
     } else {
-      Error("unknown target '%s'", target_name);
+      Error("unknown target '%s'", target_name.c_str());
       status_ = 1;
     }
   }
@@ -211,6 +239,7 @@ int Cleaner::CleanRule(const Rule* rule) {
 
   Reset();
   PrintHeader();
+  LoadDyndeps();
   DoCleanRule(rule);
   PrintFooter();
   return status_;
@@ -220,7 +249,7 @@ int Cleaner::CleanRule(const char* rule) {
   assert(rule);
 
   Reset();
-  const Rule* r = state_->LookupRule(rule);
+  const Rule* r = state_->bindings_.LookupRule(rule);
   if (r) {
     CleanRule(r);
   } else {
@@ -235,9 +264,10 @@ int Cleaner::CleanRules(int rule_count, char* rules[]) {
 
   Reset();
   PrintHeader();
+  LoadDyndeps();
   for (int i = 0; i < rule_count; ++i) {
     const char* rule_name = rules[i];
-    const Rule* rule = state_->LookupRule(rule_name);
+    const Rule* rule = state_->bindings_.LookupRule(rule_name);
     if (rule) {
       if (IsVerbose())
         printf("Rule %s\n", rule_name);
@@ -256,4 +286,17 @@ void Cleaner::Reset() {
   cleaned_files_count_ = 0;
   removed_.clear();
   cleaned_.clear();
+}
+
+void Cleaner::LoadDyndeps() {
+  // Load dyndep files that exist, before they are cleaned.
+  for (vector<Edge*>::iterator e = state_->edges_.begin();
+       e != state_->edges_.end(); ++e) {
+    if (Node* dyndep = (*e)->dyndep_) {
+      // Capture and ignore errors loading the dyndep file.
+      // We clean as much of the graph as we know.
+      std::string err;
+      dyndep_loader_.LoadDyndeps(dyndep, &err);
+    }
+  }
 }

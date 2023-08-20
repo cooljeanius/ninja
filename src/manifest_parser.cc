@@ -15,32 +15,25 @@
 #include "manifest_parser.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <vector>
 
 #include "graph.h"
-#include "metrics.h"
 #include "state.h"
 #include "util.h"
 #include "version.h"
 
-ManifestParser::ManifestParser(State* state, FileReader* file_reader)
-  : state_(state), file_reader_(file_reader) {
+using namespace std;
+
+ManifestParser::ManifestParser(State* state, FileReader* file_reader,
+                               ManifestParserOptions options)
+    : Parser(state, file_reader),
+      options_(options), quiet_(false) {
   env_ = &state->bindings_;
-}
-bool ManifestParser::Load(const string& filename, string* err) {
-  string contents;
-  string read_err;
-  if (!file_reader_->ReadFile(filename, &contents, &read_err)) {
-    *err = "loading '" + filename + "': " + read_err;
-    return false;
-  }
-  contents.resize(contents.size() + 10);
-  return Parse(filename, contents, err);
 }
 
 bool ManifestParser::Parse(const string& filename, const string& input,
                            string* err) {
-  METRIC_RECORD(".ninja parse");
   lexer_.Start(filename, input);
 
   for (;;) {
@@ -145,10 +138,8 @@ bool ManifestParser::ParseRule(string* err) {
   if (!ExpectToken(Lexer::NEWLINE, err))
     return false;
 
-  if (state_->LookupRule(name) != NULL) {
-    *err = "duplicate rule '" + name + "'";
-    return false;
-  }
+  if (env_->LookupRuleCurrentScope(name) != NULL)
+    return lexer_.Error("duplicate rule '" + name + "'", err);
 
   Rule* rule = new Rule(name);  // XXX scoped_ptr
 
@@ -176,13 +167,13 @@ bool ManifestParser::ParseRule(string* err) {
   if (rule->bindings_["command"].empty())
     return lexer_.Error("expected 'command =' line", err);
 
-  state_->AddRule(rule);
+  env_->AddRule(rule);
   return true;
 }
 
 bool ManifestParser::ParseLet(string* key, EvalString* value, string* err) {
   if (!lexer_.ReadIdent(key))
-    return false;
+    return lexer_.Error("expected variable name", err);
   if (!ExpectToken(Lexer::EQUALS, err))
     return false;
   if (!lexer_.ReadVarValue(value, err))
@@ -199,41 +190,54 @@ bool ManifestParser::ParseDefault(string* err) {
 
   do {
     string path = eval.Evaluate(env_);
-    string path_err;
-    if (!CanonicalizePath(&path, &path_err))
-      return lexer_.Error(path_err, err);
-    if (!state_->AddDefault(path, &path_err))
-      return lexer_.Error(path_err, err);
+    if (path.empty())
+      return lexer_.Error("empty path", err);
+    uint64_t slash_bits;  // Unused because this only does lookup.
+    CanonicalizePath(&path, &slash_bits);
+    std::string default_err;
+    if (!state_->AddDefault(path, &default_err))
+      return lexer_.Error(default_err, err);
 
     eval.Clear();
     if (!lexer_.ReadPath(&eval, err))
       return false;
   } while (!eval.empty());
 
-  if (!ExpectToken(Lexer::NEWLINE, err))
-    return false;
-
-  return true;
+  return ExpectToken(Lexer::NEWLINE, err);
 }
 
 bool ManifestParser::ParseEdge(string* err) {
-  vector<EvalString> ins, outs;
+  vector<EvalString> ins, outs, validations;
 
   {
     EvalString out;
     if (!lexer_.ReadPath(&out, err))
       return false;
-    if (out.empty())
-      return lexer_.Error("expected path", err);
-
-    do {
+    while (!out.empty()) {
       outs.push_back(out);
 
       out.Clear();
       if (!lexer_.ReadPath(&out, err))
         return false;
-    } while (!out.empty());
+    }
   }
+
+  // Add all implicit outs, counting how many as we go.
+  int implicit_outs = 0;
+  if (lexer_.PeekToken(Lexer::PIPE)) {
+    for (;;) {
+      EvalString out;
+      if (!lexer_.ReadPath(&out, err))
+        return false;
+      if (out.empty())
+        break;
+      outs.push_back(out);
+      ++implicit_outs;
+    }
+  }
+
+  if (outs.empty())
+    return lexer_.Error("expected path", err);
 
   if (!ExpectToken(Lexer::COLON, err))
     return false;
@@ -242,7 +246,7 @@ bool ManifestParser::ParseEdge(string* err) {
   if (!lexer_.ReadIdent(&rule_name))
     return lexer_.Error("expected build command name", err);
 
-  const Rule* rule = state_->LookupRule(rule_name);
+  const Rule* rule = env_->LookupRule(rule_name);
   if (!rule)
     return lexer_.Error("unknown build rule '" + rule_name + "'", err);
 
@@ -262,7 +266,7 @@ bool ManifestParser::ParseEdge(string* err) {
     for (;;) {
       EvalString in;
       if (!lexer_.ReadPath(&in, err))
-        return err;
+        return false;
       if (in.empty())
         break;
       ins.push_back(in);
@@ -284,19 +288,32 @@ bool ManifestParser::ParseEdge(string* err) {
     }
   }
 
+  // Add all validations, counting how many as we go.
+  if (lexer_.PeekToken(Lexer::PIPEAT)) {
+    for (;;) {
+      EvalString validation;
+      if (!lexer_.ReadPath(&validation, err))
+        return false;
+      if (validation.empty())
+        break;
+      validations.push_back(validation);
+    }
+  }
+
   if (!ExpectToken(Lexer::NEWLINE, err))
     return false;
 
-  // XXX scoped_ptr to handle error case.
-  BindingEnv* env = new BindingEnv(env_);
-
-  while (lexer_.PeekToken(Lexer::INDENT)) {
+  // Bindings on edges are rare, so allocate per-edge envs only when needed.
+  bool has_indent_token = lexer_.PeekToken(Lexer::INDENT);
+  BindingEnv* env = has_indent_token ? new BindingEnv(env_) : env_;
+  while (has_indent_token) {
     string key;
     EvalString val;
     if (!ParseLet(&key, &val, err))
       return false;
 
     env->AddBinding(key, val.Evaluate(env_));
+    has_indent_token = lexer_.PeekToken(Lexer::INDENT);
   }
 
   Edge* edge = state_->AddEdge(rule);
@@ -306,73 +323,122 @@ bool ManifestParser::ParseEdge(string* err) {
   if (!pool_name.empty()) {
     Pool* pool = state_->LookupPool(pool_name);
     if (pool == NULL)
-      return lexer_.Error("unknown pool name", err);
+      return lexer_.Error("unknown pool name '" + pool_name + "'", err);
     edge->pool_ = pool;
   }
 
+  edge->outputs_.reserve(outs.size());
+  for (size_t i = 0, e = outs.size(); i != e; ++i) {
+    string path = outs[i].Evaluate(env);
+    if (path.empty())
+      return lexer_.Error("empty path", err);
+    uint64_t slash_bits;
+    CanonicalizePath(&path, &slash_bits);
+    if (!state_->AddOut(edge, path, slash_bits)) {
+      if (options_.dupe_edge_action_ == kDupeEdgeActionError) {
+        lexer_.Error("multiple rules generate " + path, err);
+        return false;
+      } else {
+        if (!quiet_) {
+          Warning(
+              "multiple rules generate %s. builds involving this target will "
+              "not be correct; continuing anyway",
+              path.c_str());
+        }
+        if (e - i <= static_cast<size_t>(implicit_outs))
+          --implicit_outs;
+      }
+    }
+  }
+
+  if (edge->outputs_.empty()) {
+    // All outputs of the edge are already created by other edges. Don't add
+    // this edge.  Do this check before input nodes are connected to the edge.
+    state_->edges_.pop_back();
+    delete edge;
+    return true;
+  }
+  edge->implicit_outs_ = implicit_outs;
+
+  edge->inputs_.reserve(ins.size());
   for (vector<EvalString>::iterator i = ins.begin(); i != ins.end(); ++i) {
     string path = i->Evaluate(env);
-    string path_err;
-    if (!CanonicalizePath(&path, &path_err))
-      return lexer_.Error(path_err, err);
-    state_->AddIn(edge, path);
-  }
-  for (vector<EvalString>::iterator i = outs.begin(); i != outs.end(); ++i) {
-    string path = i->Evaluate(env);
-    string path_err;
-    if (!CanonicalizePath(&path, &path_err))
-      return lexer_.Error(path_err, err);
-    state_->AddOut(edge, path);
+    if (path.empty())
+      return lexer_.Error("empty path", err);
+    uint64_t slash_bits;
+    CanonicalizePath(&path, &slash_bits);
+    state_->AddIn(edge, path, slash_bits);
   }
   edge->implicit_deps_ = implicit;
   edge->order_only_deps_ = order_only;
 
-  // Multiple outputs aren't (yet?) supported with depslog.
-  string deps_type = edge->GetBinding("deps");
-  if (!deps_type.empty() && edge->outputs_.size() > 1) {
-    return lexer_.Error("multiple outputs aren't (yet?) supported by depslog; "
-                        "bring this up on the mailing list if it affects you",
-                        err);
+  edge->validations_.reserve(validations.size());
+  for (std::vector<EvalString>::iterator v = validations.begin();
+      v != validations.end(); ++v) {
+    string path = v->Evaluate(env);
+    if (path.empty())
+      return lexer_.Error("empty path", err);
+    uint64_t slash_bits;
+    CanonicalizePath(&path, &slash_bits);
+    state_->AddValidation(edge, path, slash_bits);
+  }
+
+  if (options_.phony_cycle_action_ == kPhonyCycleActionWarn &&
+      edge->maybe_phonycycle_diagnostic()) {
+    // CMake 2.8.12.x and 3.0.x incorrectly write phony build statements
+    // that reference themselves.  Ninja used to tolerate these in the
+    // build graph but that has since been fixed.  Filter them out to
+    // support users of those old CMake versions.
+    Node* out = edge->outputs_[0];
+    vector<Node*>::iterator new_end =
+        remove(edge->inputs_.begin(), edge->inputs_.end(), out);
+    if (new_end != edge->inputs_.end()) {
+      edge->inputs_.erase(new_end, edge->inputs_.end());
+      if (!quiet_) {
+        Warning("phony target '%s' names itself as an input; "
+                "ignoring [-w phonycycle=warn]",
+                out->path().c_str());
+      }
+    }
+  }
+
+  // Lookup, validate, and save any dyndep binding.  It will be used later
+  // to load generated dependency information dynamically, but it must
+  // be one of our manifest-specified inputs.
+  string dyndep = edge->GetUnescapedDyndep();
+  if (!dyndep.empty()) {
+    uint64_t slash_bits;
+    CanonicalizePath(&dyndep, &slash_bits);
+    edge->dyndep_ = state_->GetNode(dyndep, slash_bits);
+    edge->dyndep_->set_dyndep_pending(true);
+    vector<Node*>::iterator dgi =
+      std::find(edge->inputs_.begin(), edge->inputs_.end(), edge->dyndep_);
+    if (dgi == edge->inputs_.end()) {
+      return lexer_.Error("dyndep '" + dyndep + "' is not an input", err);
+    }
   }
 
   return true;
 }
 
 bool ManifestParser::ParseFileInclude(bool new_scope, string* err) {
-  // XXX this should use ReadPath!
   EvalString eval;
   if (!lexer_.ReadPath(&eval, err))
     return false;
   string path = eval.Evaluate(env_);
 
-  string contents;
-  string read_err;
-  if (!file_reader_->ReadFile(path, &contents, &read_err))
-    return lexer_.Error("loading '" + path + "': " + read_err, err);
-
-  ManifestParser subparser(state_, file_reader_);
+  ManifestParser subparser(state_, file_reader_, options_);
   if (new_scope) {
     subparser.env_ = new BindingEnv(env_);
   } else {
     subparser.env_ = env_;
   }
 
-  if (!subparser.Parse(path, contents, err))
+  if (!subparser.Load(path, err, &lexer_))
     return false;
 
   if (!ExpectToken(Lexer::NEWLINE, err))
     return false;
 
-  return true;
-}
-
-bool ManifestParser::ExpectToken(Lexer::Token expected, string* err) {
-  Lexer::Token token = lexer_.ReadToken();
-  if (token != expected) {
-    string message = string("expected ") + Lexer::TokenName(expected);
-    message += string(", got ") + Lexer::TokenName(token);
-    message += Lexer::TokenErrorHint(expected);
-    return lexer_.Error(message, err);
-  }
   return true;
 }

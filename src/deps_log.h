@@ -17,10 +17,10 @@
 
 #include <string>
 #include <vector>
-using namespace std;
 
 #include <stdio.h>
 
+#include "load_status.h"
 #include "timestamp.h"
 
 struct Node;
@@ -50,11 +50,16 @@ struct State;
 /// A dependency list maps an output id to a list of input ids.
 ///
 /// Concretely, a record is:
-///    two bytes record length, high bit indicates record type
-///      (implies max record length 32k)
-///    path records contain just the string name of the path
+///    four bytes record length, high bit indicates record type
+///      (but max record sizes are capped at 512kB)
+///    path records contain the string name of the path, followed by up to 3
+///      padding bytes to align on 4 byte boundaries, followed by the
+///      one's complement of the expected index of the record (to detect
+///      concurrent writes of multiple ninja processes to the log).
 ///    dependency records are an array of 4-byte integers
-///      [output path id, output path mtime, input path id, input path id...]
+///      [output path id,
+///       output path mtime (lower 4 bytes), output path mtime (upper 4 bytes),
+///       input path id, input path id...]
 ///      (The mtime is compared against the on-disk output path mtime
 ///      to verify the stored data is up-to-date.)
 /// If two records reference the same output the latter one in the file
@@ -65,29 +70,38 @@ struct DepsLog {
   ~DepsLog();
 
   // Writing (build-time) interface.
-  bool OpenForWrite(const string& path, string* err);
-  bool RecordDeps(Node* node, TimeStamp mtime, const vector<Node*>& nodes);
+  bool OpenForWrite(const std::string& path, std::string* err);
+  bool RecordDeps(Node* node, TimeStamp mtime, const std::vector<Node*>& nodes);
   bool RecordDeps(Node* node, TimeStamp mtime, int node_count, Node** nodes);
   void Close();
 
   // Reading (startup-time) interface.
   struct Deps {
-    Deps(int mtime, int node_count)
+    Deps(int64_t mtime, int node_count)
         : mtime(mtime), node_count(node_count), nodes(new Node*[node_count]) {}
     ~Deps() { delete [] nodes; }
-    int mtime;
+    TimeStamp mtime;
     int node_count;
     Node** nodes;
   };
-  bool Load(const string& path, State* state, string* err);
+  LoadStatus Load(const std::string& path, State* state, std::string* err);
   Deps* GetDeps(Node* node);
+  Node* GetFirstReverseDepsNode(Node* node);
 
   /// Rewrite the known log entries, throwing away old data.
-  bool Recompact(const string& path, string* err);
+  bool Recompact(const std::string& path, std::string* err);
+
+  /// Returns if the deps entry for a node is still reachable from the manifest.
+  ///
+  /// The deps log can contain deps entries for files that were built in the
+  /// past but are no longer part of the manifest.  This function returns if
+  /// this is the case for a given node.  This function is slow, don't call
+  /// it from code that runs on every build.
+  static bool IsDepsEntryLiveFor(const Node* node);
 
   /// Used for tests.
-  const vector<Node*>& nodes() const { return nodes_; }
-  const vector<Deps*>& deps() const { return deps_; }
+  const std::vector<Node*>& nodes() const { return nodes_; }
+  const std::vector<Deps*>& deps() const { return deps_; }
 
  private:
   // Updates the in-memory representation.  Takes ownership of |deps|.
@@ -96,13 +110,18 @@ struct DepsLog {
   // Write a node name record, assigning it an id.
   bool RecordId(Node* node);
 
+  /// Should be called before using file_. When false is returned, errno will
+  /// be set.
+  bool OpenForWriteIfNeeded();
+
   bool needs_recompaction_;
   FILE* file_;
+  std::string file_path_;
 
   /// Maps id -> Node.
-  vector<Node*> nodes_;
+  std::vector<Node*> nodes_;
   /// Maps id -> deps of that id.
-  vector<Deps*> deps_;
+  std::vector<Deps*> deps_;
 
   friend struct DepsLogTest;
 };

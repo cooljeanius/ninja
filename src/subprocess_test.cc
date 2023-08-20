@@ -18,10 +18,13 @@
 
 #ifndef _WIN32
 // SetWithLots need setrlimit.
+#include <stdio.h>
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <unistd.h>
 #endif
+
+using namespace std;
 
 namespace {
 
@@ -92,7 +95,70 @@ TEST_F(SubprocessTest, InterruptParent) {
       return;
   }
 
-  ADD_FAILURE() << "We should have been interrupted";
+  ASSERT_FALSE("We should have been interrupted");
+}
+
+TEST_F(SubprocessTest, InterruptChildWithSigTerm) {
+  Subprocess* subproc = subprocs_.Add("kill -TERM $$");
+  ASSERT_NE((Subprocess *) 0, subproc);
+
+  while (!subproc->Done()) {
+    subprocs_.DoWork();
+  }
+
+  EXPECT_EQ(ExitInterrupted, subproc->Finish());
+}
+
+TEST_F(SubprocessTest, InterruptParentWithSigTerm) {
+  Subprocess* subproc = subprocs_.Add("kill -TERM $PPID ; sleep 1");
+  ASSERT_NE((Subprocess *) 0, subproc);
+
+  while (!subproc->Done()) {
+    bool interrupted = subprocs_.DoWork();
+    if (interrupted)
+      return;
+  }
+
+  ASSERT_FALSE("We should have been interrupted");
+}
+
+TEST_F(SubprocessTest, InterruptChildWithSigHup) {
+  Subprocess* subproc = subprocs_.Add("kill -HUP $$");
+  ASSERT_NE((Subprocess *) 0, subproc);
+
+  while (!subproc->Done()) {
+    subprocs_.DoWork();
+  }
+
+  EXPECT_EQ(ExitInterrupted, subproc->Finish());
+}
+
+TEST_F(SubprocessTest, InterruptParentWithSigHup) {
+  Subprocess* subproc = subprocs_.Add("kill -HUP $PPID ; sleep 1");
+  ASSERT_NE((Subprocess *) 0, subproc);
+
+  while (!subproc->Done()) {
+    bool interrupted = subprocs_.DoWork();
+    if (interrupted)
+      return;
+  }
+
+  ASSERT_FALSE("We should have been interrupted");
+}
+
+TEST_F(SubprocessTest, Console) {
+  // Skip test if we don't have the console ourselves.
+  if (isatty(0) && isatty(1) && isatty(2)) {
+    Subprocess* subproc =
+        subprocs_.Add("test -t 0 -a -t 1 -a -t 2", /*use_console=*/true);
+    ASSERT_NE((Subprocess*)0, subproc);
+
+    while (!subproc->Done()) {
+      subprocs_.DoWork();
+    }
+
+    EXPECT_EQ(ExitSuccess, subproc->Finish());
+  }
 }
 
 #endif
@@ -118,7 +184,7 @@ TEST_F(SubprocessTest, SetWithMulti) {
     "cmd /c echo hi",
     "cmd /c time /t",
 #else
-    "whoami",
+    "id -u",
     "pwd",
 #endif
   };
@@ -150,20 +216,20 @@ TEST_F(SubprocessTest, SetWithMulti) {
   }
 }
 
-// OS X's process limit is less than 1025 by default
-// (|sysctl kern.maxprocperuid| is 709 on 10.7 and 10.8 and less prior to that).
-#if defined(linux) || defined(__OpenBSD__)
+#if defined(USE_PPOLL)
 TEST_F(SubprocessTest, SetWithLots) {
   // Arbitrary big number; needs to be over 1024 to confirm we're no longer
   // hostage to pselect.
-  const size_t kNumProcs = 1025;
+  const unsigned kNumProcs = 1025;
 
   // Make sure [ulimit -n] isn't going to stop us from working.
   rlimit rlim;
   ASSERT_EQ(0, getrlimit(RLIMIT_NOFILE, &rlim));
-  ASSERT_GT(rlim.rlim_cur, kNumProcs)
-      << "Raise [ulimit -n] well above " << kNumProcs
-      << " to make this test go";
+  if (rlim.rlim_cur < kNumProcs) {
+    printf("Raise [ulimit -n] above %u (currently %lu) to make this test go\n",
+           kNumProcs, rlim.rlim_cur);
+    return;
+  }
 
   vector<Subprocess*> procs;
   for (size_t i = 0; i < kNumProcs; ++i) {
@@ -179,7 +245,7 @@ TEST_F(SubprocessTest, SetWithLots) {
   }
   ASSERT_EQ(kNumProcs, subprocs_.finished_.size());
 }
-#endif  // linux || __OpenBSD__
+#endif  // !__APPLE__ && !_WIN32
 
 // TODO: this test could work on Windows, just not sure how to simply
 // read stdin.

@@ -14,22 +14,27 @@
 
 #include <string>
 #include <vector>
-using namespace std;
 
 struct StringPiece;
 
 /// Utility functions for normalizing include paths on Windows.
 /// TODO: this likely duplicates functionality of CanonicalizePath; refactor.
 struct IncludesNormalize {
+  /// Normalize path relative to |relative_to|.
+  IncludesNormalize(const std::string& relative_to);
+
   // Internal utilities made available for testing, maybe useful otherwise.
-  static string Join(const vector<string>& list, char sep);
-  static vector<string> Split(const string& input, char sep);
-  static string ToLower(const string& s);
-  static string AbsPath(StringPiece s);
-  static string Relativize(StringPiece path, const string& start);
+  static std::string AbsPath(StringPiece s, std::string* err);
+  static std::string Relativize(StringPiece path,
+                                const std::vector<StringPiece>& start_list,
+                                std::string* err);
 
   /// Normalize by fixing slashes style, fixing redundant .. and . and makes the
-  /// path relative to |relative_to|. Case is normalized to lowercase on
-  /// Windows too.
-  static string Normalize(const string& input, const char* relative_to);
+  /// path |input| relative to |this->relative_to_| and store to |result|.
+  bool Normalize(const std::string& input, std::string* result,
+                 std::string* err) const;
+
+ private:
+  std::string relative_to_;
+  std::vector<StringPiece> split_relative_to_;
 };

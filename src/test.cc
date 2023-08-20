@@ -12,36 +12,45 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifdef _WIN32
+#include <direct.h>  // Has to be before util.h is included.
+#endif
+
 #include "test.h"
 
 #include <algorithm>
 
 #include <errno.h>
+#include <stdlib.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "build_log.h"
+#include "graph.h"
 #include "manifest_parser.h"
 #include "util.h"
 
-#ifdef _WIN32
-#include <windows.h>
+#ifdef _AIX
+extern "C" {
+        // GCC "helpfully" strips the definition of mkdtemp out on AIX.
+        // The function is still present, so if we define it ourselves
+        // it will work perfectly fine.
+        extern char* mkdtemp(char* name_template);
+}
 #endif
+
+using namespace std;
 
 namespace {
 
 #ifdef _WIN32
-#ifndef _mktemp_s
-/// mingw has no mktemp.  Implement one with the same type as the one
-/// found in the Windows API.
-int _mktemp_s(char* templ) {
-  char* ofs = strchr(templ, 'X');
-  sprintf(ofs, "%d", rand() % 1000000);
-  return 0;
-}
-#endif
-
 /// Windows has no mkdtemp.  Implement it in terms of _mktemp_s.
 char* mkdtemp(char* name_template) {
-  int err = _mktemp_s(name_template);
+  int err = _mktemp_s(name_template, strlen(name_template) + 1);
   if (err < 0) {
     perror("_mktemp_s");
     return NULL;
@@ -84,18 +93,53 @@ void StateTestWithBuiltinRules::AddCatRule(State* state) {
 }
 
 Node* StateTestWithBuiltinRules::GetNode(const string& path) {
-  return state_.GetNode(path);
+  EXPECT_FALSE(strpbrk(path.c_str(), "/\\"));
+  return state_.GetNode(path, 0);
 }
 
-void AssertParse(State* state, const char* input) {
-  ManifestParser parser(state, NULL);
+void AssertParse(State* state, const char* input,
+                 ManifestParserOptions opts) {
+  ManifestParser parser(state, NULL, opts);
   string err;
-  ASSERT_TRUE(parser.ParseTest(input, &err)) << err;
+  EXPECT_TRUE(parser.ParseTest(input, &err));
   ASSERT_EQ("", err);
+  VerifyGraph(*state);
 }
 
 void AssertHash(const char* expected, uint64_t actual) {
   ASSERT_EQ(BuildLog::LogEntry::HashCommand(expected), actual);
+}
+
+void VerifyGraph(const State& state) {
+  for (vector<Edge*>::const_iterator e = state.edges_.begin();
+       e != state.edges_.end(); ++e) {
+    // All edges need at least one output.
+    EXPECT_FALSE((*e)->outputs_.empty());
+    // Check that the edge's inputs have the edge as out-edge.
+    for (vector<Node*>::const_iterator in_node = (*e)->inputs_.begin();
+         in_node != (*e)->inputs_.end(); ++in_node) {
+      const vector<Edge*>& out_edges = (*in_node)->out_edges();
+      EXPECT_NE(find(out_edges.begin(), out_edges.end(), *e),
+                out_edges.end());
+    }
+    // Check that the edge's outputs have the edge as in-edge.
+    for (vector<Node*>::const_iterator out_node = (*e)->outputs_.begin();
+         out_node != (*e)->outputs_.end(); ++out_node) {
+      EXPECT_EQ((*out_node)->in_edge(), *e);
+    }
+  }
+
+  // The union of all in- and out-edges of each nodes should be exactly edges_.
+  set<const Edge*> node_edge_set;
+  for (State::Paths::const_iterator p = state.paths_.begin();
+       p != state.paths_.end(); ++p) {
+    const Node* n = p->second;
+    if (n->in_edge())
+      node_edge_set.insert(n->in_edge());
+    node_edge_set.insert(n->out_edges().begin(), n->out_edges().end());
+  }
+  set<const Edge*> edge_set(state.edges_.begin(), state.edges_.end());
+  EXPECT_EQ(node_edge_set, edge_set);
 }
 
 void VirtualFileSystem::Create(const string& path,
@@ -105,10 +149,12 @@ void VirtualFileSystem::Create(const string& path,
   files_created_.insert(path);
 }
 
-TimeStamp VirtualFileSystem::Stat(const string& path) {
-  FileMap::iterator i = files_.find(path);
-  if (i != files_.end())
+TimeStamp VirtualFileSystem::Stat(const string& path, string* err) const {
+  FileMap::const_iterator i = files_.find(path);
+  if (i != files_.end()) {
+    *err = i->second.stat_error;
     return i->second.mtime;
+  }
   return 0;
 }
 
@@ -122,12 +168,17 @@ bool VirtualFileSystem::MakeDir(const string& path) {
   return true;  // success
 }
 
-string VirtualFileSystem::ReadFile(const string& path, string* err) {
+FileReader::Status VirtualFileSystem::ReadFile(const string& path,
+                                               string* contents,
+                                               string* err) {
   files_read_.push_back(path);
   FileMap::iterator i = files_.find(path);
-  if (i != files_.end())
-    return i->second.contents;
-  return "";
+  if (i != files_.end()) {
+    *contents = i->second.contents;
+    return Okay;
+  }
+  *err = strerror(ENOENT);
+  return NotFound;
 }
 
 int VirtualFileSystem::RemoveFile(const string& path) {

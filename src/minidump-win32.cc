@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef NINJA_BOOTSTRAP
+#ifdef _MSC_VER
 
 #include <windows.h>
 #include <DbgHelp.h>
 
-
 #include "util.h"
+
+using namespace std;
 
 typedef BOOL (WINAPI *MiniDumpWriteDumpFunc) (
     IN HANDLE,
@@ -33,17 +34,17 @@ typedef BOOL (WINAPI *MiniDumpWriteDumpFunc) (
 /// Creates a windows minidump in temp folder.
 void CreateWin32MiniDump(_EXCEPTION_POINTERS* pep) {
   char temp_path[MAX_PATH];
-  GetTempPath(sizeof(temp_path), temp_path);
+  GetTempPathA(sizeof(temp_path), temp_path);
   char temp_file[MAX_PATH];
-  sprintf(temp_file, "%s\\ninja_crash_dump_%d.dmp",
+  sprintf(temp_file, "%s\\ninja_crash_dump_%lu.dmp",
           temp_path, GetCurrentProcessId());
 
   // Delete any previous minidump of the same name.
-  DeleteFile(temp_file);
+  DeleteFileA(temp_file);
 
   // Load DbgHelp.dll dynamically, as library is not present on all
   // Windows versions.
-  HMODULE dbghelp = LoadLibrary("dbghelp.dll");
+  HMODULE dbghelp = LoadLibraryA("dbghelp.dll");
   if (dbghelp == NULL) {
     Error("failed to create minidump: LoadLibrary('dbghelp.dll'): %s",
           GetLastErrorString().c_str());
@@ -85,4 +86,4 @@ void CreateWin32MiniDump(_EXCEPTION_POINTERS* pep) {
   Warning("minidump created: %s", temp_file);
 }
 
-#endif  // NINJA_BOOTSTRAP
+#endif  // _MSC_VER

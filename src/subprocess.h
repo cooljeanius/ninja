@@ -18,12 +18,19 @@
 #include <string>
 #include <vector>
 #include <queue>
-using namespace std;
 
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <signal.h>
+#endif
+
+// ppoll() exists on FreeBSD, but only on newer versions.
+#ifdef __FreeBSD__
+#  include <sys/param.h>
+#  if defined USE_PPOLL && __FreeBSD_version < 1002000
+#    undef USE_PPOLL
+#  endif
 #endif
 
 #include "exit_status.h"
@@ -41,14 +48,14 @@ struct Subprocess {
 
   bool Done() const;
 
-  const string& GetOutput() const;
+  const std::string& GetOutput() const;
 
  private:
-  Subprocess();
-  bool Start(struct SubprocessSet* set, const string& command);
+  Subprocess(bool use_console);
+  bool Start(struct SubprocessSet* set, const std::string& command);
   void OnPipeReady();
 
-  string buf_;
+  std::string buf_;
 
 #ifdef _WIN32
   /// Set up pipe_ as the parent-side pipe of the subprocess; return the
@@ -64,6 +71,7 @@ struct Subprocess {
   int fd_;
   pid_t pid_;
 #endif
+  bool use_console_;
 
   friend struct SubprocessSet;
 };
@@ -75,22 +83,29 @@ struct SubprocessSet {
   SubprocessSet();
   ~SubprocessSet();
 
-  Subprocess* Add(const string& command);
+  Subprocess* Add(const std::string& command, bool use_console = false);
   bool DoWork();
   Subprocess* NextFinished();
   void Clear();
 
-  vector<Subprocess*> running_;
-  queue<Subprocess*> finished_;
+  std::vector<Subprocess*> running_;
+  std::queue<Subprocess*> finished_;
 
 #ifdef _WIN32
   static BOOL WINAPI NotifyInterrupted(DWORD dwCtrlType);
   static HANDLE ioport_;
 #else
   static void SetInterruptedFlag(int signum);
-  static bool interrupted_;
+  static void HandlePendingInterruption();
+  /// Store the signal number that causes the interruption.
+  /// 0 if not interruption.
+  static int interrupted_;
 
-  struct sigaction old_act_;
+  static bool IsInterrupted() { return interrupted_ != 0; }
+
+  struct sigaction old_int_act_;
+  struct sigaction old_term_act_;
+  struct sigaction old_hup_act_;
   sigset_t old_mask_;
 #endif
 };

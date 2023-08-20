@@ -15,9 +15,11 @@
 #include "build_log.h"
 
 #include <algorithm>
-using namespace std;
 
+#include <stdlib.h>
 #include <time.h>
+
+using namespace std;
 
 int random(int low, int high) {
   return int(low + (rand() / double(RAND_MAX)) * (high - low) + 0.5);
@@ -25,9 +27,10 @@ int random(int low, int high) {
 
 void RandomCommand(char** s) {
   int len = random(5, 100);
-  *s = new char[len];
+  *s = new char[len+1];
   for (int i = 0; i < len; ++i)
     (*s)[i] = (char)random(32, 127);
+  (*s)[len] = '\0';
 }
 
 int main() {
@@ -46,7 +49,7 @@ int main() {
 
   sort(hashes, hashes + N);
 
-  int num_collisions = 0;
+  int collision_count = 0;
   for (int i = 1; i < N; ++i) {
     if (hashes[i - 1].first == hashes[i].first) {
       if (strcmp(commands[hashes[i - 1].second],
@@ -54,9 +57,9 @@ int main() {
         printf("collision!\n  string 1: '%s'\n  string 2: '%s'\n",
                commands[hashes[i - 1].second],
                commands[hashes[i].second]);
-        num_collisions++;
+        collision_count++;
       }
     }
   }
-  printf("\n\n%d collisions after %d runs\n", num_collisions, N);
+  printf("\n\n%d collisions after %d runs\n", collision_count, N);
 }

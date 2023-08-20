@@ -14,9 +14,16 @@
 
 #include "deps_log.h"
 
+#include <sys/stat.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 #include "graph.h"
 #include "util.h"
 #include "test.h"
+
+using namespace std;
 
 namespace {
 
@@ -41,16 +48,16 @@ TEST_F(DepsLogTest, WriteRead) {
 
   {
     vector<Node*> deps;
-    deps.push_back(state1.GetNode("foo.h"));
-    deps.push_back(state1.GetNode("bar.h"));
-    log1.RecordDeps(state1.GetNode("out.o"), 1, deps);
+    deps.push_back(state1.GetNode("foo.h", 0));
+    deps.push_back(state1.GetNode("bar.h", 0));
+    log1.RecordDeps(state1.GetNode("out.o", 0), 1, deps);
 
     deps.clear();
-    deps.push_back(state1.GetNode("foo.h"));
-    deps.push_back(state1.GetNode("bar2.h"));
-    log1.RecordDeps(state1.GetNode("out2.o"), 2, deps);
+    deps.push_back(state1.GetNode("foo.h", 0));
+    deps.push_back(state1.GetNode("bar2.h", 0));
+    log1.RecordDeps(state1.GetNode("out2.o", 0), 2, deps);
 
-    DepsLog::Deps* log_deps = log1.GetDeps(state1.GetNode("out.o"));
+    DepsLog::Deps* log_deps = log1.GetDeps(state1.GetNode("out.o", 0));
     ASSERT_TRUE(log_deps);
     ASSERT_EQ(1, log_deps->mtime);
     ASSERT_EQ(2, log_deps->node_count);
@@ -74,12 +81,45 @@ TEST_F(DepsLogTest, WriteRead) {
   }
 
   // Spot-check the entries in log2.
-  DepsLog::Deps* log_deps = log2.GetDeps(state2.GetNode("out2.o"));
+  DepsLog::Deps* log_deps = log2.GetDeps(state2.GetNode("out2.o", 0));
   ASSERT_TRUE(log_deps);
   ASSERT_EQ(2, log_deps->mtime);
   ASSERT_EQ(2, log_deps->node_count);
   ASSERT_EQ("foo.h", log_deps->nodes[0]->path());
   ASSERT_EQ("bar2.h", log_deps->nodes[1]->path());
+}
+
+TEST_F(DepsLogTest, LotsOfDeps) {
+  const int kNumDeps = 100000;  // More than 64k.
+
+  State state1;
+  DepsLog log1;
+  string err;
+  EXPECT_TRUE(log1.OpenForWrite(kTestFilename, &err));
+  ASSERT_EQ("", err);
+
+  {
+    vector<Node*> deps;
+    for (int i = 0; i < kNumDeps; ++i) {
+      char buf[32];
+      sprintf(buf, "file%d.h", i);
+      deps.push_back(state1.GetNode(buf, 0));
+    }
+    log1.RecordDeps(state1.GetNode("out.o", 0), 1, deps);
+
+    DepsLog::Deps* log_deps = log1.GetDeps(state1.GetNode("out.o", 0));
+    ASSERT_EQ(kNumDeps, log_deps->node_count);
+  }
+
+  log1.Close();
+
+  State state2;
+  DepsLog log2;
+  EXPECT_TRUE(log2.Load(kTestFilename, &state2, &err));
+  ASSERT_EQ("", err);
+
+  DepsLog::Deps* log_deps = log2.GetDeps(state2.GetNode("out.o", 0));
+  ASSERT_EQ(kNumDeps, log_deps->node_count);
 }
 
 // Verify that adding the same deps twice doesn't grow the file.
@@ -94,18 +134,22 @@ TEST_F(DepsLogTest, DoubleEntry) {
     ASSERT_EQ("", err);
 
     vector<Node*> deps;
-    deps.push_back(state.GetNode("foo.h"));
-    deps.push_back(state.GetNode("bar.h"));
-    log.RecordDeps(state.GetNode("out.o"), 1, deps);
+    deps.push_back(state.GetNode("foo.h", 0));
+    deps.push_back(state.GetNode("bar.h", 0));
+    log.RecordDeps(state.GetNode("out.o", 0), 1, deps);
     log.Close();
-
+#ifdef __USE_LARGEFILE64
+    struct stat64 st;
+    ASSERT_EQ(0, stat64(kTestFilename, &st));
+#else
     struct stat st;
     ASSERT_EQ(0, stat(kTestFilename, &st));
+#endif
     file_size = (int)st.st_size;
     ASSERT_GT(file_size, 0);
   }
 
-  // Now reload the file, and readd the same deps.
+  // Now reload the file, and read the same deps.
   {
     State state;
     DepsLog log;
@@ -116,13 +160,17 @@ TEST_F(DepsLogTest, DoubleEntry) {
     ASSERT_EQ("", err);
 
     vector<Node*> deps;
-    deps.push_back(state.GetNode("foo.h"));
-    deps.push_back(state.GetNode("bar.h"));
-    log.RecordDeps(state.GetNode("out.o"), 1, deps);
+    deps.push_back(state.GetNode("foo.h", 0));
+    deps.push_back(state.GetNode("bar.h", 0));
+    log.RecordDeps(state.GetNode("out.o", 0), 1, deps);
     log.Close();
-
+#ifdef __USE_LARGEFILE64
+    struct stat64 st;
+    ASSERT_EQ(0, stat64(kTestFilename, &st));
+#else
     struct stat st;
     ASSERT_EQ(0, stat(kTestFilename, &st));
+#endif
     int file_size_2 = (int)st.st_size;
     ASSERT_EQ(file_size, file_size_2);
   }
@@ -130,37 +178,50 @@ TEST_F(DepsLogTest, DoubleEntry) {
 
 // Verify that adding the new deps works and can be compacted away.
 TEST_F(DepsLogTest, Recompact) {
+  const char kManifest[] =
+"rule cc\n"
+"  command = cc\n"
+"  deps = gcc\n"
+"build out.o: cc\n"
+"build other_out.o: cc\n";
+
   // Write some deps to the file and grab its size.
   int file_size;
   {
     State state;
+    ASSERT_NO_FATAL_FAILURE(AssertParse(&state, kManifest));
     DepsLog log;
     string err;
     ASSERT_TRUE(log.OpenForWrite(kTestFilename, &err));
     ASSERT_EQ("", err);
 
     vector<Node*> deps;
-    deps.push_back(state.GetNode("foo.h"));
-    deps.push_back(state.GetNode("bar.h"));
-    log.RecordDeps(state.GetNode("out.o"), 1, deps);
+    deps.push_back(state.GetNode("foo.h", 0));
+    deps.push_back(state.GetNode("bar.h", 0));
+    log.RecordDeps(state.GetNode("out.o", 0), 1, deps);
 
     deps.clear();
-    deps.push_back(state.GetNode("foo.h"));
-    deps.push_back(state.GetNode("baz.h"));
-    log.RecordDeps(state.GetNode("other_out.o"), 1, deps);
+    deps.push_back(state.GetNode("foo.h", 0));
+    deps.push_back(state.GetNode("baz.h", 0));
+    log.RecordDeps(state.GetNode("other_out.o", 0), 1, deps);
 
     log.Close();
-
+#ifdef __USE_LARGEFILE64
+    struct stat64 st;
+    ASSERT_EQ(0, stat64(kTestFilename, &st));
+#else
     struct stat st;
     ASSERT_EQ(0, stat(kTestFilename, &st));
+#endif
     file_size = (int)st.st_size;
     ASSERT_GT(file_size, 0);
   }
 
-  // Now reload the file, and add slighly different deps.
+  // Now reload the file, and add slightly different deps.
   int file_size_2;
   {
     State state;
+    ASSERT_NO_FATAL_FAILURE(AssertParse(&state, kManifest));
     DepsLog log;
     string err;
     ASSERT_TRUE(log.Load(kTestFilename, &state, &err));
@@ -169,12 +230,17 @@ TEST_F(DepsLogTest, Recompact) {
     ASSERT_EQ("", err);
 
     vector<Node*> deps;
-    deps.push_back(state.GetNode("foo.h"));
-    log.RecordDeps(state.GetNode("out.o"), 1, deps);
+    deps.push_back(state.GetNode("foo.h", 0));
+    log.RecordDeps(state.GetNode("out.o", 0), 1, deps);
     log.Close();
 
+#ifdef __USE_LARGEFILE64
+    struct stat64 st;
+    ASSERT_EQ(0, stat64(kTestFilename, &st));
+#else
     struct stat st;
     ASSERT_EQ(0, stat(kTestFilename, &st));
+#endif
     file_size_2 = (int)st.st_size;
     // The file should grow to record the new deps.
     ASSERT_GT(file_size_2, file_size);
@@ -182,20 +248,22 @@ TEST_F(DepsLogTest, Recompact) {
 
   // Now reload the file, verify the new deps have replaced the old, then
   // recompact.
+  int file_size_3;
   {
     State state;
+    ASSERT_NO_FATAL_FAILURE(AssertParse(&state, kManifest));
     DepsLog log;
     string err;
     ASSERT_TRUE(log.Load(kTestFilename, &state, &err));
 
-    Node* out = state.GetNode("out.o");
+    Node* out = state.GetNode("out.o", 0);
     DepsLog::Deps* deps = log.GetDeps(out);
     ASSERT_TRUE(deps);
     ASSERT_EQ(1, deps->mtime);
     ASSERT_EQ(1, deps->node_count);
     ASSERT_EQ("foo.h", deps->nodes[0]->path());
 
-    Node* other_out = state.GetNode("other_out.o");
+    Node* other_out = state.GetNode("other_out.o", 0);
     deps = log.GetDeps(other_out);
     ASSERT_TRUE(deps);
     ASSERT_EQ(1, deps->mtime);
@@ -222,10 +290,64 @@ TEST_F(DepsLogTest, Recompact) {
     ASSERT_EQ(other_out, log.nodes()[other_out->id()]);
 
     // The file should have shrunk a bit for the smaller deps.
+#ifdef __USE_LARGEFILE64
+    struct stat64 st;
+    ASSERT_EQ(0, stat64(kTestFilename, &st));
+#else
     struct stat st;
     ASSERT_EQ(0, stat(kTestFilename, &st));
-    int file_size_3 = (int)st.st_size;
+#endif
+    file_size_3 = (int)st.st_size;
     ASSERT_LT(file_size_3, file_size_2);
+  }
+
+  // Now reload the file and recompact with an empty manifest. The previous
+  // entries should be removed.
+  {
+    State state;
+    // Intentionally not parsing kManifest here.
+    DepsLog log;
+    string err;
+    ASSERT_TRUE(log.Load(kTestFilename, &state, &err));
+
+    Node* out = state.GetNode("out.o", 0);
+    DepsLog::Deps* deps = log.GetDeps(out);
+    ASSERT_TRUE(deps);
+    ASSERT_EQ(1, deps->mtime);
+    ASSERT_EQ(1, deps->node_count);
+    ASSERT_EQ("foo.h", deps->nodes[0]->path());
+
+    Node* other_out = state.GetNode("other_out.o", 0);
+    deps = log.GetDeps(other_out);
+    ASSERT_TRUE(deps);
+    ASSERT_EQ(1, deps->mtime);
+    ASSERT_EQ(2, deps->node_count);
+    ASSERT_EQ("foo.h", deps->nodes[0]->path());
+    ASSERT_EQ("baz.h", deps->nodes[1]->path());
+
+    ASSERT_TRUE(log.Recompact(kTestFilename, &err));
+
+    // The previous entries should have been removed.
+    deps = log.GetDeps(out);
+    ASSERT_FALSE(deps);
+
+    deps = log.GetDeps(other_out);
+    ASSERT_FALSE(deps);
+
+    // The .h files pulled in via deps should no longer have ids either.
+    ASSERT_EQ(-1, state.LookupNode("foo.h")->id());
+    ASSERT_EQ(-1, state.LookupNode("baz.h")->id());
+
+    // The file should have shrunk more.
+#ifdef __USE_LARGEFILE64
+    struct stat64 st;
+    ASSERT_EQ(0, stat64(kTestFilename, &st));
+#else
+    struct stat st;
+    ASSERT_EQ(0, stat(kTestFilename, &st));
+#endif
+    int file_size_4 = (int)st.st_size;
+    ASSERT_LT(file_size_4, file_size_3);
   }
 }
 
@@ -266,21 +388,26 @@ TEST_F(DepsLogTest, Truncated) {
     ASSERT_EQ("", err);
 
     vector<Node*> deps;
-    deps.push_back(state.GetNode("foo.h"));
-    deps.push_back(state.GetNode("bar.h"));
-    log.RecordDeps(state.GetNode("out.o"), 1, deps);
+    deps.push_back(state.GetNode("foo.h", 0));
+    deps.push_back(state.GetNode("bar.h", 0));
+    log.RecordDeps(state.GetNode("out.o", 0), 1, deps);
 
     deps.clear();
-    deps.push_back(state.GetNode("foo.h"));
-    deps.push_back(state.GetNode("bar2.h"));
-    log.RecordDeps(state.GetNode("out2.o"), 2, deps);
+    deps.push_back(state.GetNode("foo.h", 0));
+    deps.push_back(state.GetNode("bar2.h", 0));
+    log.RecordDeps(state.GetNode("out2.o", 0), 2, deps);
 
     log.Close();
   }
 
   // Get the file size.
+#ifdef __USE_LARGEFILE64
+  struct stat64 st;
+  ASSERT_EQ(0, stat64(kTestFilename, &st));
+#else
   struct stat st;
   ASSERT_EQ(0, stat(kTestFilename, &st));
+#endif
 
   // Try reloading at truncated sizes.
   // Track how many nodes/deps were found; they should decrease with
@@ -295,7 +422,7 @@ TEST_F(DepsLogTest, Truncated) {
     DepsLog log;
     EXPECT_TRUE(log.Load(kTestFilename, &state, &err));
     if (!err.empty()) {
-      // At some point the log will be so short as to be unparseable.
+      // At some point the log will be so short as to be unparsable.
       break;
     }
 
@@ -325,23 +452,30 @@ TEST_F(DepsLogTest, TruncatedRecovery) {
     ASSERT_EQ("", err);
 
     vector<Node*> deps;
-    deps.push_back(state.GetNode("foo.h"));
-    deps.push_back(state.GetNode("bar.h"));
-    log.RecordDeps(state.GetNode("out.o"), 1, deps);
+    deps.push_back(state.GetNode("foo.h", 0));
+    deps.push_back(state.GetNode("bar.h", 0));
+    log.RecordDeps(state.GetNode("out.o", 0), 1, deps);
 
     deps.clear();
-    deps.push_back(state.GetNode("foo.h"));
-    deps.push_back(state.GetNode("bar2.h"));
-    log.RecordDeps(state.GetNode("out2.o"), 2, deps);
+    deps.push_back(state.GetNode("foo.h", 0));
+    deps.push_back(state.GetNode("bar2.h", 0));
+    log.RecordDeps(state.GetNode("out2.o", 0), 2, deps);
 
     log.Close();
   }
 
   // Shorten the file, corrupting the last record.
-  struct stat st;
-  ASSERT_EQ(0, stat(kTestFilename, &st));
-  string err;
-  ASSERT_TRUE(Truncate(kTestFilename, st.st_size - 2, &err));
+  {
+#ifdef __USE_LARGEFILE64
+    struct stat64 st;
+    ASSERT_EQ(0, stat64(kTestFilename, &st));
+#else
+    struct stat st;
+    ASSERT_EQ(0, stat(kTestFilename, &st));
+#endif
+    string err;
+    ASSERT_TRUE(Truncate(kTestFilename, st.st_size - 2, &err));
+  }
 
   // Load the file again, add an entry.
   {
@@ -353,16 +487,16 @@ TEST_F(DepsLogTest, TruncatedRecovery) {
     err.clear();
 
     // The truncated entry should've been discarded.
-    EXPECT_EQ(NULL, log.GetDeps(state.GetNode("out2.o")));
+    EXPECT_EQ(NULL, log.GetDeps(state.GetNode("out2.o", 0)));
 
     EXPECT_TRUE(log.OpenForWrite(kTestFilename, &err));
     ASSERT_EQ("", err);
 
     // Add a new entry.
     vector<Node*> deps;
-    deps.push_back(state.GetNode("foo.h"));
-    deps.push_back(state.GetNode("bar2.h"));
-    log.RecordDeps(state.GetNode("out2.o"), 3, deps);
+    deps.push_back(state.GetNode("foo.h", 0));
+    deps.push_back(state.GetNode("bar2.h", 0));
+    log.RecordDeps(state.GetNode("out2.o", 0), 3, deps);
 
     log.Close();
   }
@@ -376,9 +510,36 @@ TEST_F(DepsLogTest, TruncatedRecovery) {
     EXPECT_TRUE(log.Load(kTestFilename, &state, &err));
 
     // The truncated entry should exist.
-    DepsLog::Deps* deps = log.GetDeps(state.GetNode("out2.o"));
+    DepsLog::Deps* deps = log.GetDeps(state.GetNode("out2.o", 0));
     ASSERT_TRUE(deps);
   }
+}
+
+TEST_F(DepsLogTest, ReverseDepsNodes) {
+  State state;
+  DepsLog log;
+  string err;
+  EXPECT_TRUE(log.OpenForWrite(kTestFilename, &err));
+  ASSERT_EQ("", err);
+
+  vector<Node*> deps;
+  deps.push_back(state.GetNode("foo.h", 0));
+  deps.push_back(state.GetNode("bar.h", 0));
+  log.RecordDeps(state.GetNode("out.o", 0), 1, deps);
+
+  deps.clear();
+  deps.push_back(state.GetNode("foo.h", 0));
+  deps.push_back(state.GetNode("bar2.h", 0));
+  log.RecordDeps(state.GetNode("out2.o", 0), 2, deps);
+
+  log.Close();
+
+  Node* rev_deps = log.GetFirstReverseDepsNode(state.GetNode("foo.h", 0));
+  EXPECT_TRUE(rev_deps == state.GetNode("out.o", 0) ||
+              rev_deps == state.GetNode("out2.o", 0));
+
+  rev_deps = log.GetFirstReverseDepsNode(state.GetNode("bar.h", 0));
+  EXPECT_TRUE(rev_deps == state.GetNode("out.o", 0));
 }
 
 }  // anonymous namespace

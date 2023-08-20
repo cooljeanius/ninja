@@ -19,17 +19,19 @@
 #include "eval_env.h"
 #include "util.h"
 
+using namespace std;
+
 bool Lexer::Error(const string& message, string* err) {
   // Compute line/column.
   int line = 1;
-  const char* context = input_.str_;
+  const char* line_start = input_.str_;
   for (const char* p = input_.str_; p < last_token_; ++p) {
     if (*p == '\n') {
       ++line;
-      context = p + 1;
+      line_start = p + 1;
     }
   }
-  int col = last_token_ ? (int)(last_token_ - context) : 0;
+  int col = last_token_ ? (int)(last_token_ - line_start) : 0;
 
   char buf[1024];
   snprintf(buf, sizeof(buf), "%s:%d: ", filename_.AsString().c_str(), line);
@@ -42,12 +44,12 @@ bool Lexer::Error(const string& message, string* err) {
     int len;
     bool truncated = true;
     for (len = 0; len < kTruncateColumn; ++len) {
-      if (context[len] == 0 || context[len] == '\n') {
+      if (line_start[len] == 0 || line_start[len] == '\n') {
         truncated = false;
         break;
       }
     }
-    *err += string(context, len);
+    *err += string(line_start, len);
     if (truncated)
       *err += "...";
     *err += "\n";
@@ -82,6 +84,7 @@ const char* Lexer::TokenName(Token t) {
   case NEWLINE:  return "newline";
   case PIPE2:    return "'||'";
   case PIPE:     return "'|'";
+  case PIPEAT:   return "'|@'";
   case POOL:     return "'pool'";
   case RULE:     return "'rule'";
   case SUBNINJA: return "'subninja'";
@@ -102,8 +105,6 @@ const char* Lexer::TokenErrorHint(Token expected) {
 string Lexer::DescribeLastError() {
   if (last_token_) {
     switch (last_token_[0]) {
-    case '\r':
-      return "carriage returns are not allowed, use newlines";
     case '\t':
       return "tabs are not allowed, use spaces";
     }
@@ -132,8 +133,9 @@ Lexer::Token Lexer::ReadToken() {
     simple_varname = [a-zA-Z0-9_-]+;
     varname = [a-zA-Z0-9_.-]+;
 
-    [ ]*"#"[^\000\r\n]*"\n" { continue; }
-    [ ]*[\n]   { token = NEWLINE;  break; }
+    [ ]*"#"[^\000\n]*"\n" { continue; }
+    [ ]*"\r\n" { token = NEWLINE;  break; }
+    [ ]*"\n"   { token = NEWLINE;  break; }
     [ ]+       { token = INDENT;   break; }
     "build"    { token = BUILD;    break; }
     "pool"     { token = POOL;     break; }
@@ -141,6 +143,7 @@ Lexer::Token Lexer::ReadToken() {
     "default"  { token = DEFAULT;  break; }
     "="        { token = EQUALS;   break; }
     ":"        { token = COLON;    break; }
+    "|@"       { token = PIPEAT;   break; }
     "||"       { token = PIPE2;    break; }
     "|"        { token = PIPE;     break; }
     "include"  { token = INCLUDE;  break; }
@@ -168,29 +171,36 @@ bool Lexer::PeekToken(Token token) {
 
 void Lexer::EatWhitespace() {
   const char* p = ofs_;
+  const char* q;
   for (;;) {
     ofs_ = p;
     /*!re2c
-    [ ]+  { continue; }
-    "$\n" { continue; }
-    nul   { break; }
-    [^]   { break; }
+    [ ]+    { continue; }
+    "$\r\n" { continue; }
+    "$\n"   { continue; }
+    nul     { break; }
+    [^]     { break; }
     */
   }
 }
 
 bool Lexer::ReadIdent(string* out) {
   const char* p = ofs_;
+  const char* start;
   for (;;) {
-    const char* start = p;
+    start = p;
     /*!re2c
     varname {
       out->assign(start, p - start);
       break;
     }
-    [^] { return false; }
+    [^] {
+      last_token_ = start;
+      return false;
+    }
     */
   }
+  last_token_ = start;
   ofs_ = p;
   EatWhitespace();
   return true;
@@ -206,6 +216,11 @@ bool Lexer::ReadEvalString(EvalString* eval, bool path, string* err) {
     [^$ :\r\n|\000]+ {
       eval->AddText(StringPiece(start, p - start));
       continue;
+    }
+    "\r\n" {
+      if (path)
+        p = start;
+      break;
     }
     [ :|\n] {
       if (path) {
@@ -224,6 +239,9 @@ bool Lexer::ReadEvalString(EvalString* eval, bool path, string* err) {
     }
     "$ " {
       eval->AddText(StringPiece(" ", 1));
+      continue;
+    }
+    "$\r\n"[ ]* {
       continue;
     }
     "$\n"[ ]* {

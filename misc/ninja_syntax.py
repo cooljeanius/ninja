@@ -1,5 +1,19 @@
 #!/usr/bin/python
 
+# Copyright 2011 Google Inc. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Python module for generating .ninja files.
 
 Note that this is emphatically not a required piece of Ninja; it's
@@ -7,11 +21,11 @@ just a helpful utility for build-file-generation systems that already
 use Python.
 """
 
-import textwrap
 import re
+import textwrap
 
 def escape_path(word):
-    return word.replace('$ ','$$ ').replace(' ','$ ').replace(':', '$:')
+    return word.replace('$ ', '$$ ').replace(' ', '$ ').replace(':', '$:')
 
 class Writer(object):
     def __init__(self, output, width=78):
@@ -22,7 +36,8 @@ class Writer(object):
         self.output.write('\n')
 
     def comment(self, text):
-        for line in textwrap.wrap(text, self.width - 2):
+        for line in textwrap.wrap(text, self.width - 2, break_long_words=False,
+                                  break_on_hyphens=False):
             self.output.write('# ' + line + '\n')
 
     def variable(self, key, value, indent=0):
@@ -59,23 +74,31 @@ class Writer(object):
             self.variable('deps', deps, indent=1)
 
     def build(self, outputs, rule, inputs=None, implicit=None, order_only=None,
-              variables=None):
-        outputs = self._as_list(outputs)
-        all_inputs = self._as_list(inputs)[:]
-        out_outputs = list(map(escape_path, outputs))
-        all_inputs = list(map(escape_path, all_inputs))
+              variables=None, implicit_outputs=None, pool=None, dyndep=None):
+        outputs = as_list(outputs)
+        out_outputs = [escape_path(x) for x in outputs]
+        all_inputs = [escape_path(x) for x in as_list(inputs)]
 
         if implicit:
-            implicit = map(escape_path, self._as_list(implicit))
+            implicit = [escape_path(x) for x in as_list(implicit)]
             all_inputs.append('|')
             all_inputs.extend(implicit)
         if order_only:
-            order_only = map(escape_path, self._as_list(order_only))
+            order_only = [escape_path(x) for x in as_list(order_only)]
             all_inputs.append('||')
             all_inputs.extend(order_only)
+        if implicit_outputs:
+            implicit_outputs = [escape_path(x)
+                                for x in as_list(implicit_outputs)]
+            out_outputs.append('|')
+            out_outputs.extend(implicit_outputs)
 
         self._line('build %s: %s' % (' '.join(out_outputs),
-                                        ' '.join([rule] + all_inputs)))
+                                     ' '.join([rule] + all_inputs)))
+        if pool is not None:
+            self._line('  pool = %s' % pool)
+        if dyndep is not None:
+            self._line('  dyndep = %s' % dyndep)
 
         if variables:
             if isinstance(variables, dict):
@@ -95,16 +118,16 @@ class Writer(object):
         self._line('subninja %s' % path)
 
     def default(self, paths):
-        self._line('default %s' % ' '.join(self._as_list(paths)))
+        self._line('default %s' % ' '.join(as_list(paths)))
 
     def _count_dollars_before_index(self, s, i):
-      """Returns the number of '$' characters right in front of s[i]."""
-      dollar_count = 0
-      dollar_index = i - 1
-      while dollar_index > 0 and s[dollar_index] == '$':
-        dollar_count += 1
-        dollar_index -= 1
-      return dollar_count
+        """Returns the number of '$' characters right in front of s[i]."""
+        dollar_count = 0
+        dollar_index = i - 1
+        while dollar_index > 0 and s[dollar_index] == '$':
+            dollar_count += 1
+            dollar_index -= 1
+        return dollar_count
 
     def _line(self, text, indent=0):
         """Write 'text' word-wrapped at self.width characters."""
@@ -117,19 +140,19 @@ class Writer(object):
             available_space = self.width - len(leading_space) - len(' $')
             space = available_space
             while True:
-              space = text.rfind(' ', 0, space)
-              if space < 0 or \
-                 self._count_dollars_before_index(text, space) % 2 == 0:
-                break
+                space = text.rfind(' ', 0, space)
+                if (space < 0 or
+                    self._count_dollars_before_index(text, space) % 2 == 0):
+                    break
 
             if space < 0:
                 # No such space; just use the first unescaped space we can find.
                 space = available_space - 1
                 while True:
-                  space = text.find(' ', space + 1)
-                  if space < 0 or \
-                     self._count_dollars_before_index(text, space) % 2 == 0:
-                    break
+                    space = text.find(' ', space + 1)
+                    if (space < 0 or
+                        self._count_dollars_before_index(text, space) % 2 == 0):
+                        break
             if space < 0:
                 # Give up on breaking.
                 break
@@ -142,12 +165,16 @@ class Writer(object):
 
         self.output.write(leading_space + text + '\n')
 
-    def _as_list(self, input):
-        if input is None:
-            return []
-        if isinstance(input, list):
-            return input
-        return [input]
+    def close(self):
+        self.output.close()
+
+
+def as_list(input):
+    if input is None:
+        return []
+    if isinstance(input, list):
+        return input
+    return [input]
 
 
 def escape(string):
@@ -156,3 +183,17 @@ def escape(string):
     assert '\n' not in string, 'Ninja syntax does not allow newlines'
     # We only have one special metacharacter: '$'.
     return string.replace('$', '$$')
+
+
+def expand(string, vars, local_vars={}):
+    """Expand a string containing $vars as Ninja would.
+
+    Note: doesn't handle the full Ninja variable syntax, but it's enough
+    to make configure.py's use of it work.
+    """
+    def exp(m):
+        var = m.group(1)
+        if var == '$':
+            return '$'
+        return local_vars.get(var, vars.get(var, ''))
+    return re.sub(r'\$(\$|\w*)', exp, string)

@@ -15,7 +15,10 @@
 #ifndef NINJA_MAP_H_
 #define NINJA_MAP_H_
 
+#include <algorithm>
+#include <string.h>
 #include "string_piece.h"
+#include "util.h"
 
 // MurmurHash2, by Austin Appleby
 static inline
@@ -24,9 +27,10 @@ unsigned int MurmurHash2(const void* key, size_t len) {
   const unsigned int m = 0x5bd1e995;
   const int r = 24;
   unsigned int h = seed ^ len;
-  const unsigned char * data = (const unsigned char *)key;
+  const unsigned char* data = (const unsigned char*)key;
   while (len >= 4) {
-    unsigned int k = *(unsigned int *)data;
+    unsigned int k;
+    memcpy(&k, data, sizeof k);
     k *= m;
     k ^= k >> r;
     k *= m;
@@ -37,7 +41,9 @@ unsigned int MurmurHash2(const void* key, size_t len) {
   }
   switch (len) {
   case 3: h ^= data[2] << 16;
+          NINJA_FALLTHROUGH;
   case 2: h ^= data[1] << 8;
+          NINJA_FALLTHROUGH;
   case 1: h ^= data[0];
     h *= m;
   };
@@ -47,51 +53,19 @@ unsigned int MurmurHash2(const void* key, size_t len) {
   return h;
 }
 
-#ifdef _MSC_VER
-#include <hash_map>
+#include <unordered_map>
 
-using stdext::hash_map;
-using stdext::hash_compare;
-
-struct StringPieceCmp : public hash_compare<StringPiece> {
-  size_t operator()(const StringPiece& key) const {
-    return MurmurHash2(key.str_, key.len_);
-  }
-  bool operator()(const StringPiece& a, const StringPiece& b) const {
-    int cmp = strncmp(a.str_, b.str_, min(a.len_, b.len_));
-    if (cmp < 0) {
-      return true;
-    } else if (cmp > 0) {
-      return false;
-    } else {
-      return a.len_ < b.len_;
-    }
-  }
-};
-
-#else
-
-#include <ext/hash_map>
-
-using __gnu_cxx::hash_map;
-
-namespace __gnu_cxx {
-template<>
-struct hash<std::string> {
-  size_t operator()(const std::string& s) const {
-    return hash<const char*>()(s.c_str());
-  }
-};
-
+namespace std {
 template<>
 struct hash<StringPiece> {
+  typedef StringPiece argument_type;
+  typedef size_t result_type;
+
   size_t operator()(StringPiece key) const {
     return MurmurHash2(key.str_, key.len_);
   }
 };
-
 }
-#endif
 
 /// A template for hash_maps keyed by a StringPiece whose string is
 /// owned externally (typically by the values).  Use like:
@@ -99,11 +73,7 @@ struct hash<StringPiece> {
 /// mapping StringPiece => Foo*.
 template<typename V>
 struct ExternalStringHashMap {
-#ifdef _MSC_VER
-  typedef hash_map<StringPiece, V, StringPieceCmp> Type;
-#else
-  typedef hash_map<StringPiece, V> Type;
-#endif
+  typedef std::unordered_map<StringPiece, V> Type;
 };
 
 #endif // NINJA_MAP_H_
