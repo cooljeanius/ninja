@@ -1,4 +1,4 @@
-// Copyright 2012 Google Inc. All Rights Reserved.
+// Copyright 2017 Google Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,16 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef NINJA_EXPLAIN_H_
-#define NINJA_EXPLAIN_H_
+#ifndef NINJA_STRINGPIECE_UTIL_H_
+#define NINJA_STRINGPIECE_UTIL_H_
 
-#include <stdio.h>
+#include <string>
+#include <vector>
 
-#define EXPLAIN(fmt, ...) {                                             \
-  if (g_explaining)                                                     \
-    fprintf(stderr, "ninja explain: " fmt "\n", __VA_ARGS__);           \
+#include "string_piece.h"
+
+std::vector<StringPiece> SplitStringPiece(StringPiece input, char sep);
+
+std::string JoinStringPiece(const std::vector<StringPiece>& list, char sep);
+
+inline char ToLowerASCII(char c) {
+  return (c >= 'A' && c <= 'Z') ? (c + ('a' - 'A')) : c;
 }
 
-extern bool g_explaining;
+bool EqualsCaseInsensitiveASCII(StringPiece a, StringPiece b);
 
-#endif // NINJA_EXPLAIN_H_
+#endif  // NINJA_STRINGPIECE_UTIL_H_

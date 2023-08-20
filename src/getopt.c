@@ -75,7 +75,7 @@ COPYRIGHT NOTICE AND DISCLAIMER:
 
 Copyright (C) 1997 Gregory Pietsch
 
-This file and the accompanying getopt.h header file are hereby placed in the 
+This file and the accompanying getopt.h header file are hereby placed in the
 public domain without restrictions.  Just give the author credit, don't
 claim you wrote it or prevent anyone else from using it.
 
@@ -299,7 +299,7 @@ getopt_internal (int argc, char **argv, char *shortopts,
           return (optopt = '?');
         }
       has_arg = ((cp[1] == ':')
-                 ? ((cp[2] == ':') ? OPTIONAL_ARG : REQUIRED_ARG) : no_argument);
+                 ? ((cp[2] == ':') ? OPTIONAL_ARG : required_argument) : no_argument);
       possible_arg = argv[optind] + optwhere + 1;
       optopt = *cp;
     }
@@ -318,7 +318,7 @@ getopt_internal (int argc, char **argv, char *shortopts,
       else
         optarg = NULL;
       break;
-    case REQUIRED_ARG:
+    case required_argument:
       if (*possible_arg == '=')
         possible_arg++;
       if (*possible_arg != '\0')
@@ -385,11 +385,13 @@ getopt_internal (int argc, char **argv, char *shortopts,
     return optopt;
 }
 
+#ifndef _AIX
 int
 getopt (int argc, char **argv, char *optstring)
 {
   return getopt_internal (argc, argv, optstring, NULL, NULL, 0);
 }
+#endif
 
 int
 getopt_long (int argc, char **argv, const char *shortopts,

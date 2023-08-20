@@ -26,12 +26,19 @@
 #include <unistd.h>
 #endif
 
+using namespace std;
+
 const char kTestFilename[] = "BuildLogPerfTest-tempfile";
+
+struct NoDeadPaths : public BuildLogUser {
+  virtual bool IsPathDead(StringPiece) const { return false; }
+};
 
 bool WriteTestData(string* err) {
   BuildLog log;
 
-  if (!log.OpenForWrite(kTestFilename, err))
+  NoDeadPaths no_dead_paths;
+  if (!log.OpenForWrite(kTestFilename, no_dead_paths, err))
     return false;
 
   /*
@@ -87,7 +94,7 @@ bool WriteTestData(string* err) {
     log.RecordCommand(state.edges_[i],
                       /*start_time=*/100 * i,
                       /*end_time=*/100 * i + 1,
-                      /*restat_mtime=*/0);
+                      /*mtime=*/0);
   }
 
   return true;
@@ -105,7 +112,7 @@ int main() {
   {
     // Read once to warm up disk cache.
     BuildLog log;
-    if (!log.Load(kTestFilename, &err)) {
+    if (log.Load(kTestFilename, &err) == LOAD_ERROR) {
       fprintf(stderr, "Failed to read test data: %s\n", err.c_str());
       return 1;
     }
@@ -114,7 +121,7 @@ int main() {
   for (int i = 0; i < kNumRepetitions; ++i) {
     int64_t start = GetTimeMillis();
     BuildLog log;
-    if (!log.Load(kTestFilename, &err)) {
+    if (log.Load(kTestFilename, &err) == LOAD_ERROR) {
       fprintf(stderr, "Failed to read test data: %s\n", err.c_str());
       return 1;
     }
@@ -141,4 +148,3 @@ int main() {
 
   return 0;
 }
-

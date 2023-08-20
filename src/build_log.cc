@@ -12,14 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "build_log.h"
+// On AIX, inttypes.h gets indirectly included by build_log.h.
+// It's easiest just to ask for the printf format macros right away.
+#ifndef _WIN32
+#ifndef __STDC_FORMAT_MACROS
+#define __STDC_FORMAT_MACROS
+#endif
+#endif
 
+#include "build_log.h"
+#include "disk_interface.h"
+
+#include <cassert>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
 #ifndef _WIN32
-#define __STDC_FORMAT_MACROS
 #include <inttypes.h>
 #include <unistd.h>
 #endif
@@ -28,6 +37,11 @@
 #include "graph.h"
 #include "metrics.h"
 #include "util.h"
+#if defined(_MSC_VER) && (_MSC_VER < 1800)
+#define strtoll _strtoi64
+#endif
+
+using namespace std;
 
 // Implementation details:
 // Each run's log appends to the log file.
@@ -39,8 +53,8 @@
 namespace {
 
 const char kFileSignature[] = "# ninja log v%d\n";
-const int kOldestSupportedVersion = 4;
-const int kCurrentVersion = 5;
+const int kOldestSupportedVersion = 6;
+const int kCurrentVersion = 6;
 
 // 64bit MurmurHash2, by Austin Appleby
 #if defined(_MSC_VER)
@@ -54,26 +68,33 @@ uint64_t MurmurHash64A(const void* key, size_t len) {
   const uint64_t m = BIG_CONSTANT(0xc6a4a7935bd1e995);
   const int r = 47;
   uint64_t h = seed ^ (len * m);
-  const uint64_t * data = (const uint64_t *)key;
-  const uint64_t * end = data + (len/8);
-  while (data != end) {
-    uint64_t k = *data++;
+  const unsigned char* data = (const unsigned char*)key;
+  while (len >= 8) {
+    uint64_t k;
+    memcpy(&k, data, sizeof k);
     k *= m;
     k ^= k >> r;
     k *= m;
     h ^= k;
     h *= m;
+    data += 8;
+    len -= 8;
   }
-  const unsigned char* data2 = (const unsigned char*)data;
   switch (len & 7)
   {
-  case 7: h ^= uint64_t(data2[6]) << 48;
-  case 6: h ^= uint64_t(data2[5]) << 40;
-  case 5: h ^= uint64_t(data2[4]) << 32;
-  case 4: h ^= uint64_t(data2[3]) << 24;
-  case 3: h ^= uint64_t(data2[2]) << 16;
-  case 2: h ^= uint64_t(data2[1]) << 8;
-  case 1: h ^= uint64_t(data2[0]);
+  case 7: h ^= uint64_t(data[6]) << 48;
+          NINJA_FALLTHROUGH;
+  case 6: h ^= uint64_t(data[5]) << 40;
+          NINJA_FALLTHROUGH;
+  case 5: h ^= uint64_t(data[4]) << 32;
+          NINJA_FALLTHROUGH;
+  case 4: h ^= uint64_t(data[3]) << 24;
+          NINJA_FALLTHROUGH;
+  case 3: h ^= uint64_t(data[2]) << 16;
+          NINJA_FALLTHROUGH;
+  case 2: h ^= uint64_t(data[1]) << 8;
+          NINJA_FALLTHROUGH;
+  case 1: h ^= uint64_t(data[0]);
           h *= m;
   };
   h ^= h >> r;
@@ -95,9 +116,9 @@ BuildLog::LogEntry::LogEntry(const string& output)
   : output(output) {}
 
 BuildLog::LogEntry::LogEntry(const string& output, uint64_t command_hash,
-  int start_time, int end_time, TimeStamp restat_mtime)
+  int start_time, int end_time, TimeStamp mtime)
   : output(output), command_hash(command_hash),
-    start_time(start_time), end_time(end_time), restat_mtime(restat_mtime)
+    start_time(start_time), end_time(end_time), mtime(mtime)
 {}
 
 BuildLog::BuildLog()
@@ -107,37 +128,21 @@ BuildLog::~BuildLog() {
   Close();
 }
 
-bool BuildLog::OpenForWrite(const string& path, string* err) {
+bool BuildLog::OpenForWrite(const string& path, const BuildLogUser& user,
+                            string* err) {
   if (needs_recompaction_) {
-    Close();
-    if (!Recompact(path, err))
+    if (!Recompact(path, user, err))
       return false;
   }
 
-  log_file_ = fopen(path.c_str(), "ab");
-  if (!log_file_) {
-    *err = strerror(errno);
-    return false;
-  }
-  setvbuf(log_file_, NULL, _IOLBF, BUFSIZ);
-  SetCloseOnExec(fileno(log_file_));
-
-  // Opening a file in append mode doesn't set the file pointer to the file's
-  // end on Windows. Do that explicitly.
-  fseek(log_file_, 0, SEEK_END);
-
-  if (ftell(log_file_) == 0) {
-    if (fprintf(log_file_, kFileSignature, kCurrentVersion) < 0) {
-      *err = strerror(errno);
-      return false;
-    }
-  }
-
+  assert(!log_file_);
+  log_file_path_ = path;  // we don't actually open the file right now, but will
+                          // do so on the first write attempt
   return true;
 }
 
-void BuildLog::RecordCommand(Edge* edge, int start_time, int end_time,
-                             TimeStamp restat_mtime) {
+bool BuildLog::RecordCommand(Edge* edge, int start_time, int end_time,
+                             TimeStamp mtime) {
   string command = edge->EvaluateCommand(true);
   uint64_t command_hash = LogEntry::HashCommand(command);
   for (vector<Node*>::iterator out = edge->outputs_.begin();
@@ -154,17 +159,52 @@ void BuildLog::RecordCommand(Edge* edge, int start_time, int end_time,
     log_entry->command_hash = command_hash;
     log_entry->start_time = start_time;
     log_entry->end_time = end_time;
-    log_entry->restat_mtime = restat_mtime;
+    log_entry->mtime = mtime;
 
-    if (log_file_)
-      WriteEntry(log_file_, *log_entry);
+    if (!OpenForWriteIfNeeded()) {
+      return false;
+    }
+    if (log_file_) {
+      if (!WriteEntry(log_file_, *log_entry))
+        return false;
+      if (fflush(log_file_) != 0) {
+          return false;
+      }
+    }
   }
+  return true;
 }
 
 void BuildLog::Close() {
+  OpenForWriteIfNeeded();  // create the file even if nothing has been recorded
   if (log_file_)
     fclose(log_file_);
   log_file_ = NULL;
+}
+
+bool BuildLog::OpenForWriteIfNeeded() {
+  if (log_file_ || log_file_path_.empty()) {
+    return true;
+  }
+  log_file_ = fopen(log_file_path_.c_str(), "ab");
+  if (!log_file_) {
+    return false;
+  }
+  if (setvbuf(log_file_, NULL, _IOLBF, BUFSIZ) != 0) {
+    return false;
+  }
+  SetCloseOnExec(fileno(log_file_));
+
+  // Opening a file in append mode doesn't set the file pointer to the file's
+  // end on Windows. Do that explicitly.
+  fseek(log_file_, 0, SEEK_END);
+
+  if (ftell(log_file_) == 0) {
+    if (fprintf(log_file_, kFileSignature, kCurrentVersion) < 0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 struct LineReader {
@@ -218,14 +258,14 @@ struct LineReader {
   char* line_end_;
 };
 
-bool BuildLog::Load(const string& path, string* err) {
+LoadStatus BuildLog::Load(const string& path, string* err) {
   METRIC_RECORD(".ninja_log load");
   FILE* file = fopen(path.c_str(), "r");
   if (!file) {
     if (errno == ENOENT)
-      return true;
+      return LOAD_NOT_FOUND;
     *err = strerror(errno);
-    return false;
+    return LOAD_ERROR;
   }
 
   int log_version = 0;
@@ -239,14 +279,21 @@ bool BuildLog::Load(const string& path, string* err) {
     if (!log_version) {
       sscanf(line_start, kFileSignature, &log_version);
 
+      bool invalid_log_version = false;
       if (log_version < kOldestSupportedVersion) {
-        *err = ("build log version invalid, perhaps due to being too old; "
-                "starting over");
+        invalid_log_version = true;
+        *err = "build log version is too old; starting over";
+
+      } else if (log_version > kCurrentVersion) {
+        invalid_log_version = true;
+        *err = "build log version is too new; starting over";
+      }
+      if (invalid_log_version) {
         fclose(file);
         unlink(path.c_str());
         // Don't report this as a failure.  An empty build log will cause
         // us to rebuild the outputs anyway.
-        return true;
+        return LOAD_SUCCESS;
       }
     }
 
@@ -263,7 +310,7 @@ bool BuildLog::Load(const string& path, string* err) {
     *end = 0;
 
     int start_time = 0, end_time = 0;
-    TimeStamp restat_mtime = 0;
+    TimeStamp mtime = 0;
 
     start_time = atoi(start);
     start = end + 1;
@@ -279,7 +326,7 @@ bool BuildLog::Load(const string& path, string* err) {
     if (!end)
       continue;
     *end = 0;
-    restat_mtime = atol(start);
+    mtime = strtoll(start, NULL, 10);
     start = end + 1;
 
     end = (char*)memchr(start, kFieldSeparator, line_end - start);
@@ -303,20 +350,15 @@ bool BuildLog::Load(const string& path, string* err) {
 
     entry->start_time = start_time;
     entry->end_time = end_time;
-    entry->restat_mtime = restat_mtime;
-    if (log_version >= 5) {
-      char c = *end; *end = '\0';
-      entry->command_hash = (uint64_t)strtoull(start, NULL, 16);
-      *end = c;
-    } else {
-      entry->command_hash = LogEntry::HashCommand(StringPiece(start,
-                                                              end - start));
-    }
+    entry->mtime = mtime;
+    char c = *end; *end = '\0';
+    entry->command_hash = (uint64_t)strtoull(start, NULL, 16);
+    *end = c;
   }
   fclose(file);
 
   if (!line_start) {
-    return true; // file was empty
+    return LOAD_SUCCESS; // file was empty
   }
 
   // Decide whether it's time to rebuild the log:
@@ -331,7 +373,7 @@ bool BuildLog::Load(const string& path, string* err) {
     needs_recompaction_ = true;
   }
 
-  return true;
+  return LOAD_SUCCESS;
 }
 
 BuildLog::LogEntry* BuildLog::LookupByOutput(const string& path) {
@@ -341,16 +383,17 @@ BuildLog::LogEntry* BuildLog::LookupByOutput(const string& path) {
   return NULL;
 }
 
-void BuildLog::WriteEntry(FILE* f, const LogEntry& entry) {
-  fprintf(f, "%d\t%d\t%d\t%s\t%" PRIx64 "\n",
-          entry.start_time, entry.end_time, entry.restat_mtime,
-          entry.output.c_str(), entry.command_hash);
+bool BuildLog::WriteEntry(FILE* f, const LogEntry& entry) {
+  return fprintf(f, "%d\t%d\t%" PRId64 "\t%s\t%" PRIx64 "\n",
+          entry.start_time, entry.end_time, entry.mtime,
+          entry.output.c_str(), entry.command_hash) > 0;
 }
 
-bool BuildLog::Recompact(const string& path, string* err) {
+bool BuildLog::Recompact(const string& path, const BuildLogUser& user,
+                         string* err) {
   METRIC_RECORD(".ninja_log recompact");
-  printf("Recompacting log...\n");
 
+  Close();
   string temp_path = path + ".recompact";
   FILE* f = fopen(temp_path.c_str(), "wb");
   if (!f) {
@@ -364,9 +407,22 @@ bool BuildLog::Recompact(const string& path, string* err) {
     return false;
   }
 
+  vector<StringPiece> dead_outputs;
   for (Entries::iterator i = entries_.begin(); i != entries_.end(); ++i) {
-    WriteEntry(f, *i->second);
+    if (user.IsPathDead(i->first)) {
+      dead_outputs.push_back(i->first);
+      continue;
+    }
+
+    if (!WriteEntry(f, *i->second)) {
+      *err = strerror(errno);
+      fclose(f);
+      return false;
+    }
   }
+
+  for (size_t i = 0; i < dead_outputs.size(); ++i)
+    entries_.erase(dead_outputs[i]);
 
   fclose(f);
   if (unlink(path.c_str()) < 0) {
@@ -375,6 +431,63 @@ bool BuildLog::Recompact(const string& path, string* err) {
   }
 
   if (rename(temp_path.c_str(), path.c_str()) < 0) {
+    *err = strerror(errno);
+    return false;
+  }
+
+  return true;
+}
+
+bool BuildLog::Restat(const StringPiece path,
+                      const DiskInterface& disk_interface,
+                      const int output_count, char** outputs,
+                      std::string* const err) {
+  METRIC_RECORD(".ninja_log restat");
+
+  Close();
+  std::string temp_path = path.AsString() + ".restat";
+  FILE* f = fopen(temp_path.c_str(), "wb");
+  if (!f) {
+    *err = strerror(errno);
+    return false;
+  }
+
+  if (fprintf(f, kFileSignature, kCurrentVersion) < 0) {
+    *err = strerror(errno);
+    fclose(f);
+    return false;
+  }
+  for (Entries::iterator i = entries_.begin(); i != entries_.end(); ++i) {
+    bool skip = output_count > 0;
+    for (int j = 0; j < output_count; ++j) {
+      if (i->second->output == outputs[j]) {
+        skip = false;
+        break;
+      }
+    }
+    if (!skip) {
+      const TimeStamp mtime = disk_interface.Stat(i->second->output, err);
+      if (mtime == -1) {
+        fclose(f);
+        return false;
+      }
+      i->second->mtime = mtime;
+    }
+
+    if (!WriteEntry(f, *i->second)) {
+      *err = strerror(errno);
+      fclose(f);
+      return false;
+    }
+  }
+
+  fclose(f);
+  if (unlink(path.str_) < 0) {
+    *err = strerror(errno);
+    return false;
+  }
+
+  if (rename(temp_path.c_str(), path.str_) < 0) {
     *err = strerror(errno);
     return false;
   }

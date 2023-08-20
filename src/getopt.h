@@ -4,9 +4,9 @@
 /* include files needed by this include file */
 
 /* macros defined by this include file */
-#define no_argument     0
-#define REQUIRED_ARG    1
-#define OPTIONAL_ARG    2
+#define no_argument       0
+#define required_argument 1
+#define OPTIONAL_ARG      2
 
 /* types defined by this include file */
 
@@ -39,7 +39,9 @@ extern "C"
   extern int optopt;
 
   /* function prototypes */
+#ifndef _AIX
   int getopt (int argc, char **argv, char *optstring);
+#endif
   int getopt_long (int argc, char **argv, const char *shortopts,
                    const GETOPT_LONG_OPTION_T * longopts, int *longind);
   int getopt_long_only (int argc, char **argv, const char *shortopts,

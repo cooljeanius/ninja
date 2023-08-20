@@ -14,14 +14,18 @@
 
 #include "browse.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <vector>
 
-#include "../build/browse_py.h"
+#include "build/browse_py.h"
+
+using namespace std;
 
 void RunBrowsePython(State* state, const char* ninja_command,
-                     const char* initial_target) {
+                     const char* input_file, int argc, char* argv[]) {
   // Fork off a Python process and have it run our code via its stdin.
   // (Actually the Python process becomes the parent.)
   int pipefd[2];
@@ -44,12 +48,23 @@ void RunBrowsePython(State* state, const char* ninja_command,
         break;
       }
 
-      // exec Python, telling it to run the program from stdin.
-      const char* command[] = {
-        NINJA_PYTHON, "-", ninja_command, initial_target, NULL
-      };
-      execvp(command[0], (char**)command);
-      perror("ninja: execvp");
+      std::vector<const char *> command;
+      command.push_back(NINJA_PYTHON);
+      command.push_back("-");
+      command.push_back("--ninja-command");
+      command.push_back(ninja_command);
+      command.push_back("-f");
+      command.push_back(input_file);
+      for (int i = 0; i < argc; i++) {
+          command.push_back(argv[i]);
+      }
+      command.push_back(NULL);
+      execvp(command[0], (char**)&command[0]);
+      if (errno == ENOENT) {
+        printf("ninja: %s is required for the browse tool\n", NINJA_PYTHON);
+      } else {
+        perror("ninja: execvp");
+      }
     } while (false);
     _exit(1);
   } else {  // Child.

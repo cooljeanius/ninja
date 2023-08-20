@@ -14,21 +14,13 @@
 
 #include "msvc_helper.h"
 
-#include <algorithm>
-#include <stdio.h>
-#include <string.h>
 #include <windows.h>
 
-#include "includes_normalize.h"
 #include "util.h"
 
-namespace {
+using namespace std;
 
-/// Return true if \a input ends with \a needle.
-bool EndsWith(const string& input, const string& needle) {
-  return (input.size() >= needle.size() &&
-          input.substr(input.size() - needle.size()) == needle);
-}
+namespace {
 
 string Replace(const string& input, const string& find, const string& replace) {
   string result = input;
@@ -47,85 +39,16 @@ string EscapeForDepfile(const string& path) {
   return Replace(path, " ", "\\ ");
 }
 
-// static
-string CLParser::FilterShowIncludes(const string& line) {
-  static const char kMagicPrefix[] = "Note: including file: ";
-  const char* in = line.c_str();
-  const char* end = in + line.size();
-
-  if (end - in > (int)sizeof(kMagicPrefix) - 1 &&
-      memcmp(in, kMagicPrefix, sizeof(kMagicPrefix) - 1) == 0) {
-    in += sizeof(kMagicPrefix) - 1;
-    while (*in == ' ')
-      ++in;
-    return line.substr(in - line.c_str());
-  }
-  return "";
-}
-
-// static
-bool CLParser::IsSystemInclude(string path) {
-  transform(path.begin(), path.end(), path.begin(), ::tolower);
-  // TODO: this is a heuristic, perhaps there's a better way?
-  return (path.find("program files") != string::npos ||
-          path.find("microsoft visual studio") != string::npos);
-}
-
-// static
-bool CLParser::FilterInputFilename(string line) {
-  transform(line.begin(), line.end(), line.begin(), ::tolower);
-  // TODO: other extensions, like .asm?
-  return EndsWith(line, ".c") ||
-      EndsWith(line, ".cc") ||
-      EndsWith(line, ".cxx") ||
-      EndsWith(line, ".cpp");
-}
-
-string CLParser::Parse(const string& output) {
-  string filtered_output;
-
-  // Loop over all lines in the output to process them.
-  size_t start = 0;
-  while (start < output.size()) {
-    size_t end = output.find_first_of("\r\n", start);
-    if (end == string::npos)
-      end = output.size();
-    string line = output.substr(start, end - start);
-
-    string include = FilterShowIncludes(line);
-    if (!include.empty()) {
-      include = IncludesNormalize::Normalize(include, NULL);
-      if (!IsSystemInclude(include))
-        includes_.insert(include);
-    } else if (FilterInputFilename(line)) {
-      // Drop it.
-      // TODO: if we support compiling multiple output files in a single
-      // cl.exe invocation, we should stash the filename.
-    } else {
-      filtered_output.append(line);
-      filtered_output.append("\n");
-    }
-
-    if (end < output.size() && output[end] == '\r')
-      ++end;
-    if (end < output.size() && output[end] == '\n')
-      ++end;
-    start = end;
-  }
-
-  return filtered_output;
-}
-
 int CLWrapper::Run(const string& command, string* output) {
   SECURITY_ATTRIBUTES security_attributes = {};
   security_attributes.nLength = sizeof(SECURITY_ATTRIBUTES);
   security_attributes.bInheritHandle = TRUE;
 
   // Must be inheritable so subprocesses can dup to children.
-  HANDLE nul = CreateFile("NUL", GENERIC_READ,
-                          FILE_SHARE_READ | FILE_SHARE_WRITE |
-                          FILE_SHARE_DELETE,
-                          &security_attributes, OPEN_EXISTING, 0, NULL);
+  HANDLE nul =
+      CreateFileA("NUL", GENERIC_READ,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                  &security_attributes, OPEN_EXISTING, 0, NULL);
   if (nul == INVALID_HANDLE_VALUE)
     Fatal("couldn't open nul");
 
@@ -137,10 +60,10 @@ int CLWrapper::Run(const string& command, string* output) {
     Win32Fatal("SetHandleInformation");
 
   PROCESS_INFORMATION process_info = {};
-  STARTUPINFO startup_info = {};
-  startup_info.cb = sizeof(STARTUPINFO);
+  STARTUPINFOA startup_info = {};
+  startup_info.cb = sizeof(STARTUPINFOA);
   startup_info.hStdInput = nul;
-  startup_info.hStdError = stdout_write;
+  startup_info.hStdError = ::GetStdHandle(STD_ERROR_HANDLE);
   startup_info.hStdOutput = stdout_write;
   startup_info.dwFlags |= STARTF_USESTDHANDLES;
 

@@ -17,20 +17,23 @@
 #include "util.h"
 #include "test.h"
 
+#include <sys/stat.h>
 #ifdef _WIN32
 #include <fcntl.h>
 #include <share.h>
 #else
 #include <sys/types.h>
-#include <sys/stat.h>
 #include <unistd.h>
 #endif
+#include <cassert>
+
+using namespace std;
 
 namespace {
 
 const char kTestFilename[] = "BuildLogTest-tempfile";
 
-struct BuildLogTest : public StateTestWithBuiltinRules {
+struct BuildLogTest : public StateTestWithBuiltinRules, public BuildLogUser {
   virtual void SetUp() {
     // In case a crashing test left a stale file behind.
     unlink(kTestFilename);
@@ -38,6 +41,7 @@ struct BuildLogTest : public StateTestWithBuiltinRules {
   virtual void TearDown() {
     unlink(kTestFilename);
   }
+  virtual bool IsPathDead(StringPiece s) const { return false; }
 };
 
 TEST_F(BuildLogTest, WriteRead) {
@@ -47,7 +51,7 @@ TEST_F(BuildLogTest, WriteRead) {
 
   BuildLog log1;
   string err;
-  EXPECT_TRUE(log1.OpenForWrite(kTestFilename, &err));
+  EXPECT_TRUE(log1.OpenForWrite(kTestFilename, *this, &err));
   ASSERT_EQ("", err);
   log1.RecordCommand(state_.edges_[0], 15, 18);
   log1.RecordCommand(state_.edges_[1], 20, 25);
@@ -75,7 +79,7 @@ TEST_F(BuildLogTest, FirstWriteAddsSignature) {
   BuildLog log;
   string contents, err;
 
-  EXPECT_TRUE(log.OpenForWrite(kTestFilename, &err));
+  EXPECT_TRUE(log.OpenForWrite(kTestFilename, *this, &err));
   ASSERT_EQ("", err);
   log.Close();
 
@@ -86,7 +90,7 @@ TEST_F(BuildLogTest, FirstWriteAddsSignature) {
   EXPECT_EQ(kExpectedVersion, contents);
 
   // Opening the file anew shouldn't add a second version string.
-  EXPECT_TRUE(log.OpenForWrite(kTestFilename, &err));
+  EXPECT_TRUE(log.OpenForWrite(kTestFilename, *this, &err));
   ASSERT_EQ("", err);
   log.Close();
 
@@ -100,9 +104,11 @@ TEST_F(BuildLogTest, FirstWriteAddsSignature) {
 
 TEST_F(BuildLogTest, DoubleEntry) {
   FILE* f = fopen(kTestFilename, "wb");
-  fprintf(f, "# ninja log v4\n");
-  fprintf(f, "0\t1\t2\tout\tcommand abc\n");
-  fprintf(f, "3\t4\t5\tout\tcommand def\n");
+  fprintf(f, "# ninja log v6\n");
+  fprintf(f, "0\t1\t2\tout\t%" PRIx64 "\n",
+      BuildLog::LogEntry::HashCommand("command abc"));
+  fprintf(f, "0\t1\t2\tout\t%" PRIx64 "\n",
+      BuildLog::LogEntry::HashCommand("command def"));
   fclose(f);
 
   string err;
@@ -120,16 +126,22 @@ TEST_F(BuildLogTest, Truncate) {
 "build out: cat mid\n"
 "build mid: cat in\n");
 
-  BuildLog log1;
-  string err;
-  EXPECT_TRUE(log1.OpenForWrite(kTestFilename, &err));
-  ASSERT_EQ("", err);
-  log1.RecordCommand(state_.edges_[0], 15, 18);
-  log1.RecordCommand(state_.edges_[1], 20, 25);
-  log1.Close();
-
+  {
+    BuildLog log1;
+    string err;
+    EXPECT_TRUE(log1.OpenForWrite(kTestFilename, *this, &err));
+    ASSERT_EQ("", err);
+    log1.RecordCommand(state_.edges_[0], 15, 18);
+    log1.RecordCommand(state_.edges_[1], 20, 25);
+    log1.Close();
+  }
+#ifdef __USE_LARGEFILE64
+  struct stat64 statbuf;
+  ASSERT_EQ(0, stat64(kTestFilename, &statbuf));
+#else
   struct stat statbuf;
   ASSERT_EQ(0, stat(kTestFilename, &statbuf));
+#endif
   ASSERT_GT(statbuf.st_size, 0);
 
   // For all possible truncations of the input file, assert that we don't
@@ -137,7 +149,7 @@ TEST_F(BuildLogTest, Truncate) {
   for (off_t size = statbuf.st_size; size > 0; --size) {
     BuildLog log2;
     string err;
-    EXPECT_TRUE(log2.OpenForWrite(kTestFilename, &err));
+    EXPECT_TRUE(log2.OpenForWrite(kTestFilename, *this, &err));
     ASSERT_EQ("", err);
     log2.RecordCommand(state_.edges_[0], 15, 18);
     log2.RecordCommand(state_.edges_[1], 20, 25);
@@ -147,7 +159,7 @@ TEST_F(BuildLogTest, Truncate) {
 
     BuildLog log3;
     err.clear();
-    ASSERT_TRUE(log3.Load(kTestFilename, &err) || !err.empty());
+    ASSERT_TRUE(log3.Load(kTestFilename, &err) == LOAD_SUCCESS || !err.empty());
   }
 }
 
@@ -163,10 +175,11 @@ TEST_F(BuildLogTest, ObsoleteOldVersion) {
   ASSERT_NE(err.find("version"), string::npos);
 }
 
-TEST_F(BuildLogTest, SpacesInOutputV4) {
+TEST_F(BuildLogTest, SpacesInOutput) {
   FILE* f = fopen(kTestFilename, "wb");
-  fprintf(f, "# ninja log v4\n");
-  fprintf(f, "123\t456\t456\tout with space\tcommand\n");
+  fprintf(f, "# ninja log v6\n");
+  fprintf(f, "123\t456\t456\tout with space\t%" PRIx64 "\n",
+      BuildLog::LogEntry::HashCommand("command"));
   fclose(f);
 
   string err;
@@ -178,7 +191,7 @@ TEST_F(BuildLogTest, SpacesInOutputV4) {
   ASSERT_TRUE(e);
   ASSERT_EQ(123, e->start_time);
   ASSERT_EQ(456, e->end_time);
-  ASSERT_EQ(456, e->restat_mtime);
+  ASSERT_EQ(456, e->mtime);
   ASSERT_NO_FATAL_FAILURE(AssertHash("command", e->command_hash));
 }
 
@@ -187,10 +200,12 @@ TEST_F(BuildLogTest, DuplicateVersionHeader) {
   // build log on Windows. This shouldn't crash, and the second version header
   // should be ignored.
   FILE* f = fopen(kTestFilename, "wb");
-  fprintf(f, "# ninja log v4\n");
-  fprintf(f, "123\t456\t456\tout\tcommand\n");
-  fprintf(f, "# ninja log v4\n");
-  fprintf(f, "456\t789\t789\tout2\tcommand2\n");
+  fprintf(f, "# ninja log v6\n");
+  fprintf(f, "123\t456\t456\tout\t%" PRIx64 "\n",
+      BuildLog::LogEntry::HashCommand("command"));
+  fprintf(f, "# ninja log v6\n");
+  fprintf(f, "456\t789\t789\tout2\t%" PRIx64 "\n",
+      BuildLog::LogEntry::HashCommand("command2"));
   fclose(f);
 
   string err;
@@ -202,27 +217,76 @@ TEST_F(BuildLogTest, DuplicateVersionHeader) {
   ASSERT_TRUE(e);
   ASSERT_EQ(123, e->start_time);
   ASSERT_EQ(456, e->end_time);
-  ASSERT_EQ(456, e->restat_mtime);
+  ASSERT_EQ(456, e->mtime);
   ASSERT_NO_FATAL_FAILURE(AssertHash("command", e->command_hash));
 
   e = log.LookupByOutput("out2");
   ASSERT_TRUE(e);
   ASSERT_EQ(456, e->start_time);
   ASSERT_EQ(789, e->end_time);
-  ASSERT_EQ(789, e->restat_mtime);
+  ASSERT_EQ(789, e->mtime);
   ASSERT_NO_FATAL_FAILURE(AssertHash("command2", e->command_hash));
+}
+
+struct TestDiskInterface : public DiskInterface {
+  virtual TimeStamp Stat(const string& path, string* err) const {
+    return 4;
+  }
+  virtual bool WriteFile(const string& path, const string& contents) {
+    assert(false);
+    return true;
+  }
+  virtual bool MakeDir(const string& path) {
+    assert(false);
+    return false;
+  }
+  virtual Status ReadFile(const string& path, string* contents, string* err) {
+    assert(false);
+    return NotFound;
+  }
+  virtual int RemoveFile(const string& path) {
+    assert(false);
+    return 0;
+  }
+};
+
+TEST_F(BuildLogTest, Restat) {
+  FILE* f = fopen(kTestFilename, "wb");
+  fprintf(f, "# ninja log v6\n"
+             "1\t2\t3\tout\tcommand\n");
+  fclose(f);
+  std::string err;
+  BuildLog log;
+  EXPECT_TRUE(log.Load(kTestFilename, &err));
+  ASSERT_EQ("", err);
+  BuildLog::LogEntry* e = log.LookupByOutput("out");
+  ASSERT_EQ(3, e->mtime);
+
+  TestDiskInterface testDiskInterface;
+  char out2[] = { 'o', 'u', 't', '2', 0 };
+  char* filter2[] = { out2 };
+  EXPECT_TRUE(log.Restat(kTestFilename, testDiskInterface, 1, filter2, &err));
+  ASSERT_EQ("", err);
+  e = log.LookupByOutput("out");
+  ASSERT_EQ(3, e->mtime); // unchanged, since the filter doesn't match
+
+  EXPECT_TRUE(log.Restat(kTestFilename, testDiskInterface, 0, NULL, &err));
+  ASSERT_EQ("", err);
+  e = log.LookupByOutput("out");
+  ASSERT_EQ(4, e->mtime);
 }
 
 TEST_F(BuildLogTest, VeryLongInputLine) {
   // Ninja's build log buffer is currently 256kB. Lines longer than that are
   // silently ignored, but don't affect parsing of other lines.
   FILE* f = fopen(kTestFilename, "wb");
-  fprintf(f, "# ninja log v4\n");
+  fprintf(f, "# ninja log v6\n");
   fprintf(f, "123\t456\t456\tout\tcommand start");
   for (size_t i = 0; i < (512 << 10) / strlen(" more_command"); ++i)
     fputs(" more_command", f);
   fprintf(f, "\n");
-  fprintf(f, "456\t789\t789\tout2\tcommand2\n");
+  fprintf(f, "456\t789\t789\tout2\t%" PRIx64 "\n",
+      BuildLog::LogEntry::HashCommand("command2"));
   fclose(f);
 
   string err;
@@ -237,7 +301,7 @@ TEST_F(BuildLogTest, VeryLongInputLine) {
   ASSERT_TRUE(e);
   ASSERT_EQ(456, e->start_time);
   ASSERT_EQ(789, e->end_time);
-  ASSERT_EQ(789, e->restat_mtime);
+  ASSERT_EQ(789, e->mtime);
   ASSERT_NO_FATAL_FAILURE(AssertHash("command2", e->command_hash));
 }
 
@@ -259,6 +323,46 @@ TEST_F(BuildLogTest, MultiTargetEdge) {
   ASSERT_EQ(21, e2->start_time);
   ASSERT_EQ(22, e2->end_time);
   ASSERT_EQ(22, e2->end_time);
+}
+
+struct BuildLogRecompactTest : public BuildLogTest {
+  virtual bool IsPathDead(StringPiece s) const { return s == "out2"; }
+};
+
+TEST_F(BuildLogRecompactTest, Recompact) {
+  AssertParse(&state_,
+"build out: cat in\n"
+"build out2: cat in\n");
+
+  BuildLog log1;
+  string err;
+  EXPECT_TRUE(log1.OpenForWrite(kTestFilename, *this, &err));
+  ASSERT_EQ("", err);
+  // Record the same edge several times, to trigger recompaction
+  // the next time the log is opened.
+  for (int i = 0; i < 200; ++i)
+    log1.RecordCommand(state_.edges_[0], 15, 18 + i);
+  log1.RecordCommand(state_.edges_[1], 21, 22);
+  log1.Close();
+
+  // Load...
+  BuildLog log2;
+  EXPECT_TRUE(log2.Load(kTestFilename, &err));
+  ASSERT_EQ("", err);
+  ASSERT_EQ(2u, log2.entries().size());
+  ASSERT_TRUE(log2.LookupByOutput("out"));
+  ASSERT_TRUE(log2.LookupByOutput("out2"));
+  // ...and force a recompaction.
+  EXPECT_TRUE(log2.OpenForWrite(kTestFilename, *this, &err));
+  log2.Close();
+
+  // "out2" is dead, it should've been removed.
+  BuildLog log3;
+  EXPECT_TRUE(log2.Load(kTestFilename, &err));
+  ASSERT_EQ("", err);
+  ASSERT_EQ(1u, log2.entries().size());
+  ASSERT_TRUE(log2.LookupByOutput("out"));
+  ASSERT_FALSE(log2.LookupByOutput("out2"));
 }
 
 }  // anonymous namespace

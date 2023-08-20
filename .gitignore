@@ -1,27 +1,56 @@
+
 *DS_Store*
 *~
 *.o
 *.pyc
+*.obj
 *.exe
 *.pdb
 *.ilk
 TAGS
-/build
+/build*/
 /build.ninja
 /ninja
+/ninja.bootstrap
 /build_log_perftest
 /canon_perftest
+/clparser_perftest
+/depfile_parser_perftest
+/parser_perftest
 /hash_collision_bench
 /ninja_test
-/parser_perftest
+/manifest_parser_perftest
 /graph.png
 /doc/manual.html
 /doc/doxygen
 /gtest-1.6.0
+*.patch
+.DS_Store
 
 # Eclipse project files
 .project
 .cproject
 
-ninja.bootstrap
+# SublimeText project files
+*.sublime-project
+*.sublime-workspace
 
+# Ninja output
+.ninja_deps
+.ninja_log
+
+# Visual Studio Code project files
+/.vscode/
+/.ccls-cache/
+
+# Qt Creator project files
+/CMakeLists.txt.user
+
+# clangd
+/.clangd/
+/compile_commands.json
+/.cache/
+
+# Visual Studio files
+/.vs/
+/out/

@@ -1,4 +1,4 @@
-// Copyright 2012 Google Inc. All Rights Reserved.
+// Copyright 2019 Google Inc. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,4 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-bool g_explaining = false;
+#ifndef NINJA_LOAD_STATUS_H_
+#define NINJA_LOAD_STATUS_H_
+
+enum LoadStatus {
+  LOAD_ERROR,
+  LOAD_SUCCESS,
+  LOAD_NOT_FOUND,
+};
+
+#endif  // NINJA_LOAD_STATUS_H_

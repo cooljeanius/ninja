@@ -15,55 +15,58 @@
 #ifndef NINJA_MANIFEST_PARSER_H_
 #define NINJA_MANIFEST_PARSER_H_
 
-#include <string>
-
-using namespace std;
-
-#include "lexer.h"
+#include "parser.h"
 
 struct BindingEnv;
 struct EvalString;
-struct State;
+
+enum DupeEdgeAction {
+  kDupeEdgeActionWarn,
+  kDupeEdgeActionError,
+};
+
+enum PhonyCycleAction {
+  kPhonyCycleActionWarn,
+  kPhonyCycleActionError,
+};
+
+struct ManifestParserOptions {
+  ManifestParserOptions()
+      : dupe_edge_action_(kDupeEdgeActionWarn),
+        phony_cycle_action_(kPhonyCycleActionWarn) {}
+  DupeEdgeAction dupe_edge_action_;
+  PhonyCycleAction phony_cycle_action_;
+};
 
 /// Parses .ninja files.
-struct ManifestParser {
-  struct FileReader {
-    virtual ~FileReader() {}
-    virtual bool ReadFile(const string& path, string* content, string* err) = 0;
-  };
-
-  ManifestParser(State* state, FileReader* file_reader);
-
-  /// Load and parse a file.
-  bool Load(const string& filename, string* err);
+struct ManifestParser : public Parser {
+  ManifestParser(State* state, FileReader* file_reader,
+                 ManifestParserOptions options = ManifestParserOptions());
 
   /// Parse a text string of input.  Used by tests.
-  bool ParseTest(const string& input, string* err) {
+  bool ParseTest(const std::string& input, std::string* err) {
+    quiet_ = true;
     return Parse("input", input, err);
   }
 
 private:
   /// Parse a file, given its contents as a string.
-  bool Parse(const string& filename, const string& input, string* err);
+  bool Parse(const std::string& filename, const std::string& input,
+             std::string* err);
 
   /// Parse various statement types.
-  bool ParsePool(string* err);
-  bool ParseRule(string* err);
-  bool ParseLet(string* key, EvalString* val, string* err);
-  bool ParseEdge(string* err);
-  bool ParseDefault(string* err);
+  bool ParsePool(std::string* err);
+  bool ParseRule(std::string* err);
+  bool ParseLet(std::string* key, EvalString* val, std::string* err);
+  bool ParseEdge(std::string* err);
+  bool ParseDefault(std::string* err);
 
   /// Parse either a 'subninja' or 'include' line.
-  bool ParseFileInclude(bool new_scope, string* err);
+  bool ParseFileInclude(bool new_scope, std::string* err);
 
-  /// If the next token is not \a expected, produce an error string
-  /// saying "expectd foo, got bar".
-  bool ExpectToken(Lexer::Token expected, string* err);
-
-  State* state_;
   BindingEnv* env_;
-  FileReader* file_reader_;
-  Lexer lexer_;
+  ManifestParserOptions options_;
+  bool quiet_;
 };
 
 #endif  // NINJA_MANIFEST_PARSER_H_

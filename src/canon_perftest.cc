@@ -18,13 +18,14 @@
 #include "util.h"
 #include "metrics.h"
 
+using namespace std;
+
 const char kPath[] =
     "../../third_party/WebKit/Source/WebCore/"
     "platform/leveldb/LevelDBWriteBatch.cpp";
 
 int main() {
   vector<int> times;
-  string err;
 
   char buf[200];
   size_t len = strlen(kPath);
@@ -33,8 +34,9 @@ int main() {
   for (int j = 0; j < 5; ++j) {
     const int kNumRepetitions = 2000000;
     int64_t start = GetTimeMillis();
+    uint64_t slash_bits;
     for (int i = 0; i < kNumRepetitions; ++i) {
-      CanonicalizePath(buf, &len, &err);
+      CanonicalizePath(buf, &len, &slash_bits);
     }
     int delta = (int)(GetTimeMillis() - start);
     times.push_back(delta);
