@@ -15,66 +15,92 @@
 #ifndef NINJA_BUILD_LOG_H_
 #define NINJA_BUILD_LOG_H_
 
-#include <map>
 #include <string>
-using namespace std;
+#include <stdio.h>
 
 #include "hash_map.h"
+#include "load_status.h"
+#include "timestamp.h"
+#include "util.h"  // uint64_t
 
-struct BuildConfig;
+struct DiskInterface;
 struct Edge;
+
+/// Can answer questions about the manifest for the BuildLog.
+struct BuildLogUser {
+  /// Return if a given output is no longer part of the build manifest.
+  /// This is only called during recompaction and doesn't have to be fast.
+  virtual bool IsPathDead(StringPiece s) const = 0;
+};
 
 /// Store a log of every command ran for every build.
 /// It has a few uses:
 ///
-/// 1) historical command lines for output files, so we know
+/// 1) (hashes of) command lines for existing output files, so we know
 ///    when we need to rebuild due to the command changing
-/// 2) historical timing information
-/// 3) maybe we can generate some sort of build overview output
-///    from it
+/// 2) timing information, perhaps for generating reports
+/// 3) restat information
 struct BuildLog {
   BuildLog();
   ~BuildLog();
 
-  void SetConfig(BuildConfig* config) { config_ = config; }
-  bool OpenForWrite(const string& path, string* err);
-  void RecordCommand(Edge* edge, int start_time, int end_time,
-                     time_t restat_mtime = 0);
+  /// Prepares writing to the log file without actually opening it - that will
+  /// happen when/if it's needed
+  bool OpenForWrite(const std::string& path, const BuildLogUser& user,
+                    std::string* err);
+  bool RecordCommand(Edge* edge, int start_time, int end_time,
+                     TimeStamp mtime = 0);
   void Close();
 
   /// Load the on-disk log.
-  bool Load(const string& path, string* err);
+  LoadStatus Load(const std::string& path, std::string* err);
 
   struct LogEntry {
-    string output;
-    string command;
+    std::string output;
+    uint64_t command_hash;
     int start_time;
     int end_time;
-    time_t restat_mtime;
+    TimeStamp mtime;
+
+    static uint64_t HashCommand(StringPiece command);
 
     // Used by tests.
     bool operator==(const LogEntry& o) {
-      return output == o.output && command == o.command &&
+      return output == o.output && command_hash == o.command_hash &&
           start_time == o.start_time && end_time == o.end_time &&
-          restat_mtime == o.restat_mtime;
+          mtime == o.mtime;
     }
+
+    explicit LogEntry(const std::string& output);
+    LogEntry(const std::string& output, uint64_t command_hash,
+             int start_time, int end_time, TimeStamp mtime);
   };
 
   /// Lookup a previously-run command by its output path.
-  LogEntry* LookupByOutput(const string& path);
+  LogEntry* LookupByOutput(const std::string& path);
 
   /// Serialize an entry into a log file.
-  void WriteEntry(FILE* f, const LogEntry& entry);
+  bool WriteEntry(FILE* f, const LogEntry& entry);
 
   /// Rewrite the known log entries, throwing away old data.
-  bool Recompact(const string& path, string* err);
+  bool Recompact(const std::string& path, const BuildLogUser& user,
+                 std::string* err);
 
-  // TODO: make these private.
-  typedef ExternalStringHashMap<LogEntry*>::Type Log;
-  Log log_;
-private:
+  /// Restat all outputs in the log
+  bool Restat(StringPiece path, const DiskInterface& disk_interface,
+              int output_count, char** outputs, std::string* err);
+
+  typedef ExternalStringHashMap<LogEntry*>::Type Entries;
+  const Entries& entries() const { return entries_; }
+
+ private:
+  /// Should be called before using log_file_. When false is returned, errno
+  /// will be set.
+  bool OpenForWriteIfNeeded();
+
+  Entries entries_;
   FILE* log_file_;
-  BuildConfig* config_;
+  std::string log_file_path_;
   bool needs_recompaction_;
 };
 

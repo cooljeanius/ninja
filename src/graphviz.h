@@ -16,17 +16,26 @@
 #define NINJA_GRAPHVIZ_H_
 
 #include <set>
-using namespace std;
 
+#include "dyndep.h"
+#include "graph.h"
+
+struct DiskInterface;
 struct Node;
+struct Edge;
+struct State;
 
 /// Runs the process of creating GraphViz .dot file output.
 struct GraphViz {
+  GraphViz(State* state, DiskInterface* disk_interface)
+      : dyndep_loader_(state, disk_interface) {}
   void Start();
   void AddTarget(Node* node);
   void Finish();
 
-  set<Node*> visited_;
+  DyndepLoader dyndep_loader_;
+  std::set<Node*> visited_nodes_;
+  EdgeSet visited_edges_;
 };
 
 #endif  // NINJA_GRAPHVIZ_H_

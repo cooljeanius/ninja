@@ -17,37 +17,54 @@
 
 #include <string>
 
-using namespace std;
-
 #include <string.h>
 
 /// StringPiece represents a slice of a string whose memory is managed
 /// externally.  It is useful for reducing the number of std::strings
 /// we need to allocate.
 struct StringPiece {
+  typedef const char* const_iterator;
+
   StringPiece() : str_(NULL), len_(0) {}
 
   /// The constructors intentionally allow for implicit conversions.
-  StringPiece(const string& str) : str_(str.data()), len_(str.size()) {}
+  StringPiece(const std::string& str) : str_(str.data()), len_(str.size()) {}
   StringPiece(const char* str) : str_(str), len_(strlen(str)) {}
 
-  StringPiece(const char* str, int len) : str_(str), len_(len) {}
+  StringPiece(const char* str, size_t len) : str_(str), len_(len) {}
 
   bool operator==(const StringPiece& other) const {
     return len_ == other.len_ && memcmp(str_, other.str_, len_) == 0;
   }
+
   bool operator!=(const StringPiece& other) const {
     return !(*this == other);
   }
 
   /// Convert the slice into a full-fledged std::string, copying the
   /// data into a new string.
-  string AsString() const {
-    return len_ ? string(str_, len_) : string();
+  std::string AsString() const {
+    return len_ ? std::string(str_, len_) : std::string();
+  }
+
+  const_iterator begin() const {
+    return str_;
+  }
+
+  const_iterator end() const {
+    return str_ + len_;
+  }
+
+  char operator[](size_t pos) const {
+    return str_[pos];
+  }
+
+  size_t size() const {
+    return len_;
   }
 
   const char* str_;
-  int len_;
+  size_t len_;
 };
 
 #endif  // NINJA_STRINGPIECE_H_

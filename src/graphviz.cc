@@ -15,15 +15,21 @@
 #include "graphviz.h"
 
 #include <stdio.h>
+#include <algorithm>
 
+#include "dyndep.h"
 #include "graph.h"
 
+using namespace std;
+
 void GraphViz::AddTarget(Node* node) {
-  if (visited_.find(node) != visited_.end())
+  if (visited_nodes_.find(node) != visited_nodes_.end())
     return;
 
-  printf("\"%p\" [label=\"%s\"]\n", node, node->path().c_str());
-  visited_.insert(node);
+  string pathstr = node->path();
+  replace(pathstr.begin(), pathstr.end(), '\\', '/');
+  printf("\"%p\" [label=\"%s\"]\n", node, pathstr.c_str());
+  visited_nodes_.insert(node);
 
   Edge* edge = node->in_edge();
 
@@ -31,6 +37,17 @@ void GraphViz::AddTarget(Node* node) {
     // Leaf node.
     // Draw as a rect?
     return;
+  }
+
+  if (visited_edges_.find(edge) != visited_edges_.end())
+    return;
+  visited_edges_.insert(edge);
+
+  if (edge->dyndep_ && edge->dyndep_->dyndep_pending()) {
+    std::string err;
+    if (!dyndep_loader_.LoadDyndeps(edge->dyndep_, &err)) {
+      Warning("%s\n", err.c_str());
+    }
   }
 
   if (edge->inputs_.size() == 1 && edge->outputs_.size() == 1) {
@@ -63,6 +80,7 @@ void GraphViz::AddTarget(Node* node) {
 
 void GraphViz::Start() {
   printf("digraph ninja {\n");
+  printf("rankdir=\"LR\"\n");
   printf("node [fontsize=10, shape=box, height=0.25]\n");
   printf("edge [fontsize=10]\n");
 }

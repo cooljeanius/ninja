@@ -21,20 +21,64 @@
 #include "graph.h"
 #include "util.h"
 
+using namespace std;
+
+void Pool::EdgeScheduled(const Edge& edge) {
+  if (depth_ != 0)
+    current_use_ += edge.weight();
+}
+
+void Pool::EdgeFinished(const Edge& edge) {
+  if (depth_ != 0)
+    current_use_ -= edge.weight();
+}
+
+void Pool::DelayEdge(Edge* edge) {
+  assert(depth_ != 0);
+  delayed_.insert(edge);
+}
+
+void Pool::RetrieveReadyEdges(EdgeSet* ready_queue) {
+  DelayedEdges::iterator it = delayed_.begin();
+  while (it != delayed_.end()) {
+    Edge* edge = *it;
+    if (current_use_ + edge->weight() > depth_)
+      break;
+    ready_queue->insert(edge);
+    EdgeScheduled(*edge);
+    ++it;
+  }
+  delayed_.erase(delayed_.begin(), it);
+}
+
+void Pool::Dump() const {
+  printf("%s (%d/%d) ->\n", name_.c_str(), current_use_, depth_);
+  for (DelayedEdges::const_iterator it = delayed_.begin();
+       it != delayed_.end(); ++it)
+  {
+    printf("\t");
+    (*it)->Dump();
+  }
+}
+
+Pool State::kDefaultPool("", 0);
+Pool State::kConsolePool("console", 1);
 const Rule State::kPhonyRule("phony");
 
-State::State() : build_log_(NULL) {
-  AddRule(&kPhonyRule);
+State::State() {
+  bindings_.AddRule(&kPhonyRule);
+  AddPool(&kDefaultPool);
+  AddPool(&kConsolePool);
 }
 
-void State::AddRule(const Rule* rule) {
-  assert(LookupRule(rule->name()) == NULL);
-  rules_[rule->name()] = rule;
+void State::AddPool(Pool* pool) {
+  assert(LookupPool(pool->name()) == NULL);
+  pools_[pool->name()] = pool;
 }
 
-const Rule* State::LookupRule(const string& rule_name) {
-  map<string, const Rule*>::iterator i = rules_.find(rule_name);
-  if (i == rules_.end())
+Pool* State::LookupPool(const string& pool_name) {
+  map<string, Pool*>::iterator i = pools_.find(pool_name);
+  if (i == pools_.end())
     return NULL;
   return i->second;
 }
@@ -42,22 +86,24 @@ const Rule* State::LookupRule(const string& rule_name) {
 Edge* State::AddEdge(const Rule* rule) {
   Edge* edge = new Edge();
   edge->rule_ = rule;
+  edge->pool_ = &State::kDefaultPool;
   edge->env_ = &bindings_;
+  edge->id_ = edges_.size();
   edges_.push_back(edge);
   return edge;
 }
 
-Node* State::GetNode(const string& path) {
+Node* State::GetNode(StringPiece path, uint64_t slash_bits) {
   Node* node = LookupNode(path);
   if (node)
     return node;
-  node = new Node(path);
-  paths_[node->path().c_str()] = node;
+  node = new Node(path.AsString(), slash_bits);
+  paths_[node->path()] = node;
   return node;
 }
 
-Node* State::LookupNode(const string& path) {
-  Paths::iterator i = paths_.find(path.c_str());
+Node* State::LookupNode(StringPiece path) const {
+  Paths::const_iterator i = paths_.find(path);
   if (i != paths_.end())
     return i->second;
   return NULL;
@@ -80,37 +126,43 @@ Node* State::SpellcheckNode(const string& path) {
   return result;
 }
 
-void State::AddIn(Edge* edge, const string& path) {
-  Node* node = GetNode(path);
+void State::AddIn(Edge* edge, StringPiece path, uint64_t slash_bits) {
+  Node* node = GetNode(path, slash_bits);
   edge->inputs_.push_back(node);
   node->AddOutEdge(edge);
 }
 
-void State::AddOut(Edge* edge, const string& path) {
-  Node* node = GetNode(path);
+bool State::AddOut(Edge* edge, StringPiece path, uint64_t slash_bits) {
+  Node* node = GetNode(path, slash_bits);
+  if (node->in_edge())
+    return false;
   edge->outputs_.push_back(node);
-  if (node->in_edge()) {
-    Warning("multiple rules generate %s. "
-            "build will not be correct; continuing anyway", path.c_str());
-  }
   node->set_in_edge(edge);
+  return true;
 }
 
-bool State::AddDefault(const string& path, string* err) {
+void State::AddValidation(Edge* edge, StringPiece path, uint64_t slash_bits) {
+  Node* node = GetNode(path, slash_bits);
+  edge->validations_.push_back(node);
+  node->AddValidationOutEdge(edge);
+}
+
+bool State::AddDefault(StringPiece path, string* err) {
   Node* node = LookupNode(path);
   if (!node) {
-    *err = "unknown target '" + path + "'";
+    *err = "unknown target '" + path.AsString() + "'";
     return false;
   }
   defaults_.push_back(node);
   return true;
 }
 
-vector<Node*> State::RootNodes(string* err) {
+vector<Node*> State::RootNodes(string* err) const {
   vector<Node*> root_nodes;
   // Search for nodes with no output.
-  for (vector<Edge*>::iterator e = edges_.begin(); e != edges_.end(); ++e) {
-    for (vector<Node*>::iterator out = (*e)->outputs_.begin();
+  for (vector<Edge*>::const_iterator e = edges_.begin();
+       e != edges_.end(); ++e) {
+    for (vector<Node*>::const_iterator out = (*e)->outputs_.begin();
          out != (*e)->outputs_.end(); ++out) {
       if ((*out)->out_edges().empty())
         root_nodes.push_back(*out);
@@ -120,27 +172,40 @@ vector<Node*> State::RootNodes(string* err) {
   if (!edges_.empty() && root_nodes.empty())
     *err = "could not determine root nodes of build graph";
 
-  assert(edges_.empty() || !root_nodes.empty());
   return root_nodes;
 }
 
-vector<Node*> State::DefaultNodes(string* err) {
+vector<Node*> State::DefaultNodes(string* err) const {
   return defaults_.empty() ? RootNodes(err) : defaults_;
 }
 
 void State::Reset() {
   for (Paths::iterator i = paths_.begin(); i != paths_.end(); ++i)
     i->second->ResetState();
-  for (vector<Edge*>::iterator e = edges_.begin(); e != edges_.end(); ++e)
+  for (vector<Edge*>::iterator e = edges_.begin(); e != edges_.end(); ++e) {
     (*e)->outputs_ready_ = false;
+    (*e)->deps_loaded_ = false;
+    (*e)->mark_ = Edge::VisitNone;
+  }
 }
 
 void State::Dump() {
   for (Paths::iterator i = paths_.begin(); i != paths_.end(); ++i) {
     Node* node = i->second;
-    printf("%s %s\n",
+    printf("%s %s [id:%d]\n",
            node->path().c_str(),
            node->status_known() ? (node->dirty() ? "dirty" : "clean")
-                                : "unknown");
+                                : "unknown",
+           node->id());
+  }
+  if (!pools_.empty()) {
+    printf("resource_pools:\n");
+    for (map<string, Pool*>::const_iterator it = pools_.begin();
+         it != pools_.end(); ++it)
+    {
+      if (!it->second->name().empty()) {
+        it->second->Dump();
+      }
+    }
   }
 }

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Copyright 2001 Google Inc. All Rights Reserved.
 #
@@ -20,41 +20,90 @@ This script is inlined into the final executable and spawned by
 it when needed.
 """
 
-import BaseHTTPServer
+try:
+    import http.server as httpserver
+    import socketserver
+except ImportError:
+    import BaseHTTPServer as httpserver
+    import SocketServer as socketserver
+import argparse
+import os
+import socket
 import subprocess
 import sys
 import webbrowser
+if sys.version_info >= (3, 2):
+    from html import escape
+else:
+    from cgi import escape
+try:
+    from urllib.request import unquote
+except ImportError:
+    from urllib2 import unquote
+from collections import namedtuple
 
-def match_strip(prefix, line):
+Node = namedtuple('Node', ['inputs', 'rule', 'target', 'outputs'])
+
+# Ideally we'd allow you to navigate to a build edge or a build node,
+# with appropriate views for each.  But there's no way to *name* a build
+# edge so we can only display nodes.
+#
+# For a given node, it has at most one input edge, which has n
+# different inputs.  This becomes node.inputs.  (We leave out the
+# outputs of the input edge due to what follows.)  The node can have
+# multiple dependent output edges.  Rather than attempting to display
+# those, they are summarized by taking the union of all their outputs.
+#
+# This means there's no single view that shows you all inputs and outputs
+# of an edge.  But I think it's less confusing than alternatives.
+
+def match_strip(line, prefix):
     if not line.startswith(prefix):
-        print prefix, line
-        assert line.startswith(prefix)
-    return line[len(prefix):]
+        return (False, line)
+    return (True, line[len(prefix):])
+
+def html_escape(text):
+    return escape(text, quote=True)
 
 def parse(text):
-    lines = text.split('\n')
-    node = lines.pop(0)
-    node = node[:-1]  # strip trailing colon
+    lines = iter(text.split('\n'))
 
-    input = []
-    if lines and lines[0].startswith('  input:'):
-        input.append(match_strip('  input: ', lines.pop(0)))
-        while lines and lines[0].startswith('    '):
-            input.append(lines.pop(0).strip())
-
+    target = None
+    rule = None
+    inputs = []
     outputs = []
-    while lines:
-        output = []
-        output.append(match_strip('  output: ', lines.pop(0)))
-        while lines and lines[0].startswith('    '):
-            output.append(lines.pop(0).strip())
-        outputs.append(output)
 
-    return (node, input, outputs)
+    try:
+        target = next(lines)[:-1]  # strip trailing colon
 
-def generate_html(data):
-    node, input, outputs = data
-    print '''<!DOCTYPE html>
+        line = next(lines)
+        (match, rule) = match_strip(line, '  input: ')
+        if match:
+            (match, line) = match_strip(next(lines), '    ')
+            while match:
+                type = None
+                (match, line) = match_strip(line, '| ')
+                if match:
+                    type = 'implicit'
+                (match, line) = match_strip(line, '|| ')
+                if match:
+                    type = 'order-only'
+                inputs.append((line, type))
+                (match, line) = match_strip(next(lines), '    ')
+
+        match, _ = match_strip(line, '  outputs:')
+        if match:
+            (match, line) = match_strip(next(lines), '    ')
+            while match:
+                outputs.append(line)
+                (match, line) = match_strip(next(lines), '    ')
+    except StopIteration:
+        pass
+
+    return Node(inputs, rule, target, outputs)
+
+def create_page(body):
+    return '''<!DOCTYPE html>
 <style>
 body {
     font-family: sans;
@@ -63,61 +112,64 @@ body {
 }
 h1 {
     font-weight: normal;
+    font-size: 140%;
     text-align: center;
     margin: 0;
 }
 h2 {
     font-weight: normal;
+    font-size: 120%;
 }
 tt {
     font-family: WebKitHack, monospace;
+    white-space: nowrap;
 }
-ul {
-    margin-top: 0;
-    padding-left: 20px;
+.filelist {
+  -webkit-columns: auto 2;
 }
-</style>'''
-    print '<table width=500><tr><td colspan=3>'
-    print '<h1><tt>%s</tt></h1>' % node
-    print '</td></tr>'
+</style>
+''' + body
 
-    print '<tr><td valign=top>'
-    if input:
-        print '<h2>built by rule: <tt>%s</tt></h2>' % input[0]
-        if len(input) > 0:
-            print 'inputs:'
-            print '<ul>'
-            for i in input[1:]:
-                print '<li><tt><a href="?%s">%s</a></tt></li>' % (i, i)
-            print '</ul>'
-    else:
-        print '<h2>no input rule</h2>'
-    print '</td>'
-    print '<td width=50>&nbsp;</td>'
+def generate_html(node):
+    document = ['<h1><tt>%s</tt></h1>' % html_escape(node.target)]
 
-    print '<td valign=top>'
-    print '<h2>dependents</h2>'
-    for output in outputs:
-        print '<tt>%s</tt>' % output[0]
-        print '<ul>'
-        for i in output[1:]:
-            print '<li><tt><a href="?%s">%s</a></tt></li>' % (i, i)
-        print '</ul>'
-    print '</td></tr></table>'
+    if node.inputs:
+        document.append('<h2>target is built using rule <tt>%s</tt> of</h2>' %
+                        html_escape(node.rule))
+        if len(node.inputs) > 0:
+            document.append('<div class=filelist>')
+            for input, type in sorted(node.inputs):
+                extra = ''
+                if type:
+                    extra = ' (%s)' % html_escape(type)
+                document.append('<tt><a href="?%s">%s</a>%s</tt><br>' %
+                                (html_escape(input), html_escape(input), extra))
+            document.append('</div>')
+
+    if node.outputs:
+        document.append('<h2>dependent edges build:</h2>')
+        document.append('<div class=filelist>')
+        for output in sorted(node.outputs):
+            document.append('<tt><a href="?%s">%s</a></tt><br>' %
+                            (html_escape(output), html_escape(output)))
+        document.append('</div>')
+
+    return '\n'.join(document)
 
 def ninja_dump(target):
-    proc = subprocess.Popen([sys.argv[1], '-t', 'query', target],
-                            stdout=subprocess.PIPE)
-    return proc.communicate()[0]
+    cmd = [args.ninja_command, '-f', args.f, '-t', 'query', target]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            universal_newlines=True)
+    return proc.communicate() + (proc.returncode,)
 
-class RequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
+class RequestHandler(httpserver.BaseHTTPRequestHandler):
     def do_GET(self):
         assert self.path[0] == '/'
-        target = self.path[1:]
+        target = unquote(self.path[1:])
 
         if target == '':
             self.send_response(302)
-            self.send_header('Location', '?' + sys.argv[2])
+            self.send_header('Location', '?' + args.initial_target)
             self.end_headers()
             return
 
@@ -127,28 +179,53 @@ class RequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             return
         target = target[1:]
 
-        input = ninja_dump(target)
+        ninja_output, ninja_error, exit_code = ninja_dump(target)
+        if exit_code == 0:
+            page_body = generate_html(parse(ninja_output.strip()))
+        else:
+            # Relay ninja's error message.
+            page_body = '<h1><tt>%s</tt></h1>' % html_escape(ninja_error)
 
         self.send_response(200)
         self.end_headers()
-        stdout = sys.stdout
-        sys.stdout = self.wfile
-        try:
-            generate_html(parse(input.strip()))
-        finally:
-            sys.stdout = stdout
+        self.wfile.write(create_page(page_body).encode('utf-8'))
 
     def log_message(self, format, *args):
         pass  # Swallow console spam.
 
-port = 8000
-httpd = BaseHTTPServer.HTTPServer(('',port), RequestHandler)
+parser = argparse.ArgumentParser(prog='ninja -t browse')
+parser.add_argument('--port', '-p', default=8000, type=int,
+    help='Port number to use (default %(default)d)')
+parser.add_argument('--hostname', '-a', default='localhost', type=str,
+    help='Hostname to bind to (default %(default)s)')
+parser.add_argument('--no-browser', action='store_true',
+    help='Do not open a webbrowser on startup.')
+
+parser.add_argument('--ninja-command', default='ninja',
+    help='Path to ninja binary (default %(default)s)')
+parser.add_argument('-f', default='build.ninja',
+    help='Path to build.ninja file (default %(default)s)')
+parser.add_argument('initial_target', default='all', nargs='?',
+    help='Initial target to show (default %(default)s)')
+
+class HTTPServer(socketserver.ThreadingMixIn, httpserver.HTTPServer):
+    # terminate server immediately when Python exits.
+    daemon_threads = True
+
+args = parser.parse_args()
+port = args.port
+hostname = args.hostname
+httpd = HTTPServer((hostname,port), RequestHandler)
 try:
-    print 'Web server running on port %d, ctl-C to abort...' % port
-    webbrowser.open_new('http://localhost:%s' % port)
+    if hostname == "":
+        hostname = socket.gethostname()
+    print('Web server running on %s:%d, ctl-C to abort...' % (hostname,port) )
+    print('Web server pid %d' % os.getpid(), file=sys.stderr )
+    if not args.no_browser:
+        webbrowser.open_new('http://%s:%s' % (hostname, port) )
     httpd.serve_forever()
 except KeyboardInterrupt:
-    print
+    print()
     pass  # Swallow console spam.
 
 

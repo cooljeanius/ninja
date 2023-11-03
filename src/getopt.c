@@ -75,7 +75,7 @@ COPYRIGHT NOTICE AND DISCLAIMER:
 
 Copyright (C) 1997 Gregory Pietsch
 
-This file and the accompanying getopt.h header file are hereby placed in the 
+This file and the accompanying getopt.h header file are hereby placed in the
 public domain without restrictions.  Just give the author credit, don't
 claim you wrote it or prevent anyone else from using it.
 
@@ -89,10 +89,6 @@ gpietsch@comcast.net
 #include <string.h>
 #ifndef GETOPT_H
 #include "getopt.h"
-#endif
-
-#ifdef _WIN32
-#pragma warning(disable: 4701)
 #endif
 
 /* macros */
@@ -159,7 +155,7 @@ getopt_internal (int argc, char **argv, char *shortopts,
   char *possible_arg = NULL;
   int longopt_match = -1;
   int has_arg = -1;
-  char *cp;
+  char *cp = NULL;
   int arg_next = 0;
 
   /* first, deal with silly parameters and easy stuff */
@@ -255,7 +251,7 @@ getopt_internal (int argc, char **argv, char *shortopts,
                       longopts[optindex].name, match_chars) == 0)
             {
               /* do we have an exact match? */
-              if (match_chars == (int) (strlen (longopts[optindex].name)))
+              if (match_chars == strlen (longopts[optindex].name))
                 {
                   longopt_match = optindex;
                   break;
@@ -303,7 +299,7 @@ getopt_internal (int argc, char **argv, char *shortopts,
           return (optopt = '?');
         }
       has_arg = ((cp[1] == ':')
-                 ? ((cp[2] == ':') ? OPTIONAL_ARG : REQUIRED_ARG) : no_argument);
+                 ? ((cp[2] == ':') ? OPTIONAL_ARG : required_argument) : no_argument);
       possible_arg = argv[optind] + optwhere + 1;
       optopt = *cp;
     }
@@ -322,7 +318,7 @@ getopt_internal (int argc, char **argv, char *shortopts,
       else
         optarg = NULL;
       break;
-    case REQUIRED_ARG:
+    case required_argument:
       if (*possible_arg == '=')
         possible_arg++;
       if (*possible_arg != '\0')
@@ -389,24 +385,26 @@ getopt_internal (int argc, char **argv, char *shortopts,
     return optopt;
 }
 
+#ifndef _AIX
 int
 getopt (int argc, char **argv, char *optstring)
 {
   return getopt_internal (argc, argv, optstring, NULL, NULL, 0);
 }
+#endif
 
 int
-getopt_long (int argc, char **argv, char *shortopts,
-             GETOPT_LONG_OPTION_T * longopts, int *longind)
+getopt_long (int argc, char **argv, const char *shortopts,
+             const GETOPT_LONG_OPTION_T * longopts, int *longind)
 {
-  return getopt_internal (argc, argv, shortopts, longopts, longind, 0);
+  return getopt_internal (argc, argv, (char*)shortopts, (GETOPT_LONG_OPTION_T*)longopts, longind, 0);
 }
 
 int
-getopt_long_only (int argc, char **argv, char *shortopts,
-                  GETOPT_LONG_OPTION_T * longopts, int *longind)
+getopt_long_only (int argc, char **argv, const char *shortopts,
+                  const GETOPT_LONG_OPTION_T * longopts, int *longind)
 {
-  return getopt_internal (argc, argv, shortopts, longopts, longind, 1);
+  return getopt_internal (argc, argv, (char*)shortopts, (GETOPT_LONG_OPTION_T*)longopts, longind, 1);
 }
 
 /* end of file GETOPT.C */

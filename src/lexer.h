@@ -12,7 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifndef NINJA_LEXER_H_
+#define NINJA_LEXER_H_
+
 #include "string_piece.h"
+
+// Windows may #define ERROR.
+#ifdef ERROR
+#undef ERROR
+#endif
 
 struct EvalString;
 
@@ -33,6 +41,8 @@ struct Lexer {
     NEWLINE,
     PIPE,
     PIPE2,
+    PIPEAT,
+    POOL,
     RULE,
     SUBNINJA,
     TEOF,
@@ -40,6 +50,13 @@ struct Lexer {
 
   /// Return a human-readable form of a token, used in error messages.
   static const char* TokenName(Token t);
+
+  /// Return a human-readable token hint, used in error messages.
+  static const char* TokenErrorHint(Token expected);
+
+  /// If the last token read was an ERROR token, provide more info
+  /// or the empty string.
+  std::string DescribeLastError();
 
   /// Start parsing some input.
   void Start(StringPiece filename, StringPiece input);
@@ -55,30 +72,30 @@ struct Lexer {
 
   /// Read a simple identifier (a rule or variable name).
   /// Returns false if a name can't be read.
-  bool ReadIdent(string* out);
+  bool ReadIdent(std::string* out);
 
   /// Read a path (complete with $escapes).
   /// Returns false only on error, returned path may be empty if a delimiter
   /// (space, newline) is hit.
-  bool ReadPath(EvalString* path, string* err) {
+  bool ReadPath(EvalString* path, std::string* err) {
     return ReadEvalString(path, true, err);
   }
 
   /// Read the value side of a var = value line (complete with $escapes).
   /// Returns false only on error.
-  bool ReadVarValue(EvalString* value, string* err) {
+  bool ReadVarValue(EvalString* value, std::string* err) {
     return ReadEvalString(value, false, err);
   }
 
   /// Construct an error message with context.
-  bool Error(const string& message, string* err);
+  bool Error(const std::string& message, std::string* err);
 
 private:
   /// Skip past whitespace (called after each read token/ident/etc.).
   void EatWhitespace();
 
   /// Read a $-escaped string.
-  bool ReadEvalString(EvalString* eval, bool path, string* err);
+  bool ReadEvalString(EvalString* eval, bool path, std::string* err);
 
   StringPiece filename_;
   StringPiece input_;
@@ -86,3 +103,4 @@ private:
   const char* last_token_;
 };
 
+#endif // NINJA_LEXER_H_

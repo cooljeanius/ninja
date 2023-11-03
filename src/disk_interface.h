@@ -15,24 +15,45 @@
 #ifndef NINJA_DISK_INTERFACE_H_
 #define NINJA_DISK_INTERFACE_H_
 
+#include <map>
 #include <string>
+
+#include "timestamp.h"
+
+/// Interface for reading files from disk.  See DiskInterface for details.
+/// This base offers the minimum interface needed just to read files.
+struct FileReader {
+  virtual ~FileReader() {}
+
+  /// Result of ReadFile.
+  enum Status {
+    Okay,
+    NotFound,
+    OtherError
+  };
+
+  /// Read and store in given string.  On success, return Okay.
+  /// On error, return another Status and fill |err|.
+  virtual Status ReadFile(const std::string& path, std::string* contents,
+                          std::string* err) = 0;
+};
 
 /// Interface for accessing the disk.
 ///
 /// Abstract so it can be mocked out for tests.  The real implementation
 /// is RealDiskInterface.
-struct DiskInterface {
-  virtual ~DiskInterface() {}
-
+struct DiskInterface: public FileReader {
   /// stat() a file, returning the mtime, or 0 if missing and -1 on
   /// other errors.
-  virtual int Stat(const std::string& path) = 0;
+  virtual TimeStamp Stat(const std::string& path, std::string* err) const = 0;
 
   /// Create a directory, returning false on failure.
   virtual bool MakeDir(const std::string& path) = 0;
 
-  /// Read a file to a string.  Fill in |err| on error.
-  virtual std::string ReadFile(const std::string& path, std::string* err) = 0;
+  /// Create a file, with the specified name and contents
+  /// Returns true on success, false on failure
+  virtual bool WriteFile(const std::string& path,
+                         const std::string& contents) = 0;
 
   /// Remove the file named @a path. It behaves like 'rm -f path' so no errors
   /// are reported if it does not exists.
@@ -48,11 +69,37 @@ struct DiskInterface {
 
 /// Implementation of DiskInterface that actually hits the disk.
 struct RealDiskInterface : public DiskInterface {
+  RealDiskInterface();
   virtual ~RealDiskInterface() {}
-  virtual int Stat(const std::string& path);
+  virtual TimeStamp Stat(const std::string& path, std::string* err) const;
   virtual bool MakeDir(const std::string& path);
-  virtual std::string ReadFile(const std::string& path, std::string* err);
+  virtual bool WriteFile(const std::string& path, const std::string& contents);
+  virtual Status ReadFile(const std::string& path, std::string* contents,
+                          std::string* err);
   virtual int RemoveFile(const std::string& path);
+
+  /// Whether stat information can be cached.  Only has an effect on Windows.
+  void AllowStatCache(bool allow);
+
+#ifdef _WIN32
+  /// Whether long paths are enabled.  Only has an effect on Windows.
+  bool AreLongPathsEnabled() const;
+#endif
+
+ private:
+#ifdef _WIN32
+  /// Whether stat information can be cached.
+  bool use_cache_;
+
+  /// Whether long paths are enabled.
+  bool long_paths_enabled_;
+
+  typedef std::map<std::string, TimeStamp> DirCache;
+  // TODO: Neither a map nor a hashmap seems ideal here.  If the statcache
+  // works out, come up with a better data structure.
+  typedef std::map<std::string, DirCache> Cache;
+  mutable Cache cache_;
+#endif
 };
 
 #endif  // NINJA_DISK_INTERFACE_H_

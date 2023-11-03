@@ -14,9 +14,10 @@
 
 #include "lexer.h"
 
-#include <gtest/gtest.h>
-
 #include "eval_env.h"
+#include "test.h"
+
+using namespace std;
 
 TEST(Lexer, ReadVarValue) {
   Lexer lexer("plain text $var $VaR ${x}\n");
@@ -29,12 +30,12 @@ TEST(Lexer, ReadVarValue) {
 }
 
 TEST(Lexer, ReadEvalStringEscapes) {
-  Lexer lexer("$ $$ab $\ncde\n");
+  Lexer lexer("$ $$ab c$: $\ncde\n");
   EvalString eval;
   string err;
   EXPECT_TRUE(lexer.ReadVarValue(&eval, &err));
   EXPECT_EQ("", err);
-  EXPECT_EQ("[ $ab cde]",
+  EXPECT_EQ("[ $ab c: cde]",
             eval.Serialize());
 }
 
@@ -74,7 +75,7 @@ TEST(Lexer, Error) {
   ASSERT_FALSE(lexer.ReadVarValue(&eval, &err));
   EXPECT_EQ("input:2: bad $-escape (literal $ must be written as $$)\n"
             "bad $\n"
-            "    ^ near here\n"
+            "    ^ near here"
             , err);
 }
 
@@ -84,4 +85,14 @@ TEST(Lexer, CommentEOF) {
   Lexer lexer("# foo");
   Lexer::Token token = lexer.ReadToken();
   EXPECT_EQ(Lexer::ERROR, token);
+}
+
+TEST(Lexer, Tabs) {
+  // Verify we print a useful error on a disallowed character.
+  Lexer lexer("   \tfoobar");
+  Lexer::Token token = lexer.ReadToken();
+  EXPECT_EQ(Lexer::INDENT, token);
+  token = lexer.ReadToken();
+  EXPECT_EQ(Lexer::ERROR, token);
+  EXPECT_EQ("tabs are not allowed, use spaces", lexer.DescribeLastError());
 }
