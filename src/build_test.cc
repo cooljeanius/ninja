@@ -15,6 +15,8 @@
 #include "build.h"
 
 #include <assert.h>
+#include <climits>
+#include <stdint.h>
 
 #include "build_log.h"
 #include "deps_log.h"
@@ -50,6 +52,14 @@ struct PlanTest : public StateTestWithBuiltinRules {
     sort(ret->begin(), ret->end(), CompareEdgesByOutput::cmp);
   }
 
+  void PrepareForTarget(const char* node, BuildLog *log=NULL) {
+    string err;
+    EXPECT_TRUE(plan_.AddTarget(GetNode(node), &err));
+    ASSERT_EQ("", err);
+    plan_.PrepareQueue();
+    ASSERT_TRUE(plan_.more_to_do());
+  }
+
   void TestPoolWithDepthOne(const char *test_case);
 };
 
@@ -59,10 +69,7 @@ TEST_F(PlanTest, Basic) {
 "build mid: cat in\n"));
   GetNode("mid")->MarkDirty();
   GetNode("out")->MarkDirty();
-  string err;
-  EXPECT_TRUE(plan_.AddTarget(GetNode("out"), &err));
-  ASSERT_EQ("", err);
-  ASSERT_TRUE(plan_.more_to_do());
+  PrepareForTarget("out");
 
   Edge* edge = plan_.FindWork();
   ASSERT_TRUE(edge);
@@ -71,6 +78,7 @@ TEST_F(PlanTest, Basic) {
 
   ASSERT_FALSE(plan_.FindWork());
 
+  string err;
   plan_.EdgeFinished(edge, Plan::kEdgeSucceeded, &err);
   ASSERT_EQ("", err);
 
@@ -95,15 +103,12 @@ TEST_F(PlanTest, DoubleOutputDirect) {
   GetNode("mid1")->MarkDirty();
   GetNode("mid2")->MarkDirty();
   GetNode("out")->MarkDirty();
-
-  string err;
-  EXPECT_TRUE(plan_.AddTarget(GetNode("out"), &err));
-  ASSERT_EQ("", err);
-  ASSERT_TRUE(plan_.more_to_do());
+  PrepareForTarget("out");
 
   Edge* edge;
   edge = plan_.FindWork();
   ASSERT_TRUE(edge);  // cat in
+  string err;
   plan_.EdgeFinished(edge, Plan::kEdgeSucceeded, &err);
   ASSERT_EQ("", err);
 
@@ -128,14 +133,12 @@ TEST_F(PlanTest, DoubleOutputIndirect) {
   GetNode("b1")->MarkDirty();
   GetNode("b2")->MarkDirty();
   GetNode("out")->MarkDirty();
-  string err;
-  EXPECT_TRUE(plan_.AddTarget(GetNode("out"), &err));
-  ASSERT_EQ("", err);
-  ASSERT_TRUE(plan_.more_to_do());
+  PrepareForTarget("out");
 
   Edge* edge;
   edge = plan_.FindWork();
   ASSERT_TRUE(edge);  // cat in
+  string err;
   plan_.EdgeFinished(edge, Plan::kEdgeSucceeded, &err);
   ASSERT_EQ("", err);
 
@@ -169,15 +172,12 @@ TEST_F(PlanTest, DoubleDependent) {
   GetNode("a1")->MarkDirty();
   GetNode("a2")->MarkDirty();
   GetNode("out")->MarkDirty();
-
-  string err;
-  EXPECT_TRUE(plan_.AddTarget(GetNode("out"), &err));
-  ASSERT_EQ("", err);
-  ASSERT_TRUE(plan_.more_to_do());
+  PrepareForTarget("out");
 
   Edge* edge;
   edge = plan_.FindWork();
   ASSERT_TRUE(edge);  // cat in
+  string err;
   plan_.EdgeFinished(edge, Plan::kEdgeSucceeded, &err);
   ASSERT_EQ("", err);
 
@@ -209,6 +209,7 @@ void PlanTest::TestPoolWithDepthOne(const char* test_case) {
   ASSERT_EQ("", err);
   EXPECT_TRUE(plan_.AddTarget(GetNode("out2"), &err));
   ASSERT_EQ("", err);
+  plan_.PrepareQueue();
   ASSERT_TRUE(plan_.more_to_do());
 
   Edge* edge = plan_.FindWork();
@@ -284,10 +285,7 @@ TEST_F(PlanTest, PoolsWithDepthTwo) {
     GetNode("outb" + string(1, '1' + static_cast<char>(i)))->MarkDirty();
   }
   GetNode("allTheThings")->MarkDirty();
-
-  string err;
-  EXPECT_TRUE(plan_.AddTarget(GetNode("allTheThings"), &err));
-  ASSERT_EQ("", err);
+  PrepareForTarget("allTheThings");
 
   deque<Edge*> edges;
   FindWorkSorted(&edges, 5);
@@ -306,6 +304,7 @@ TEST_F(PlanTest, PoolsWithDepthTwo) {
   ASSERT_EQ("outb3", edge->outputs_[0]->path());
 
   // finish out1
+  string err;
   plan_.EdgeFinished(edges.front(), Plan::kEdgeSucceeded, &err);
   ASSERT_EQ("", err);
   edges.pop_front();
@@ -363,10 +362,7 @@ TEST_F(PlanTest, PoolWithRedundantEdges) {
   GetNode("bar.cpp.obj")->MarkDirty();
   GetNode("libfoo.a")->MarkDirty();
   GetNode("all")->MarkDirty();
-  string err;
-  EXPECT_TRUE(plan_.AddTarget(GetNode("all"), &err));
-  ASSERT_EQ("", err);
-  ASSERT_TRUE(plan_.more_to_do());
+  PrepareForTarget("all");
 
   Edge* edge = NULL;
 
@@ -375,6 +371,7 @@ TEST_F(PlanTest, PoolWithRedundantEdges) {
 
   edge = initial_edges[1];  // Foo first
   ASSERT_EQ("foo.cpp", edge->outputs_[0]->path());
+  string err;
   plan_.EdgeFinished(edge, Plan::kEdgeSucceeded, &err);
   ASSERT_EQ("", err);
 
@@ -439,6 +436,7 @@ TEST_F(PlanTest, PoolWithFailingEdge) {
   ASSERT_EQ("", err);
   EXPECT_TRUE(plan_.AddTarget(GetNode("out2"), &err));
   ASSERT_EQ("", err);
+  plan_.PrepareQueue();
   ASSERT_TRUE(plan_.more_to_do());
 
   Edge* edge = plan_.FindWork();
@@ -467,13 +465,63 @@ TEST_F(PlanTest, PoolWithFailingEdge) {
   ASSERT_EQ(0, edge);
 }
 
+TEST_F(PlanTest, PriorityWithoutBuildLog) {
+  // Without a build log, the critical time is equivalent to graph
+  // depth. Test with the following graph:
+  //   a2
+  //   |
+  //   a1  b1
+  //   |  |  |
+  //   a0 b0 c0
+  //    \ | /
+  //     out
+
+  ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
+    "rule r\n"
+    "  command = unused\n"
+    "build out: r a0 b0 c0\n"
+    "build a0: r a1\n"
+    "build a1: r a2\n"
+    "build b0: r b1\n"
+    "build c0: r b1\n"
+  ));
+  GetNode("a1")->MarkDirty();
+  GetNode("a0")->MarkDirty();
+  GetNode("b0")->MarkDirty();
+  GetNode("c0")->MarkDirty();
+  GetNode("out")->MarkDirty();
+  BuildLog log;
+  PrepareForTarget("out", &log);
+
+  EXPECT_EQ(GetNode("out")->in_edge()->critical_path_weight(), 1);
+  EXPECT_EQ(GetNode("a0")->in_edge()->critical_path_weight(), 2);
+  EXPECT_EQ(GetNode("b0")->in_edge()->critical_path_weight(), 2);
+  EXPECT_EQ(GetNode("c0")->in_edge()->critical_path_weight(), 2);
+  EXPECT_EQ(GetNode("a1")->in_edge()->critical_path_weight(), 3);
+
+  const int n_edges = 5;
+  const char *expected_order[n_edges] = {
+    "a1", "a0", "b0", "c0", "out"};
+  for (int i = 0; i < n_edges; ++i) {
+    Edge* edge = plan_.FindWork();
+    ASSERT_TRUE(edge != nullptr);
+    EXPECT_EQ(expected_order[i], edge->outputs_[0]->path());
+
+    std::string err;
+    ASSERT_TRUE(plan_.EdgeFinished(edge, Plan::kEdgeSucceeded, &err));
+    EXPECT_EQ(err, "");
+  }
+
+  EXPECT_FALSE(plan_.FindWork());
+}
+
 /// Fake implementation of CommandRunner, useful for tests.
 struct FakeCommandRunner : public CommandRunner {
   explicit FakeCommandRunner(VirtualFileSystem* fs) :
       max_active_edges_(1), fs_(fs) {}
 
   // CommandRunner impl
-  virtual bool CanRunMore() const;
+  virtual size_t CanRunMore() const;
   virtual bool StartCommand(Edge* edge);
   virtual bool WaitForCommand(Result* result);
   virtual vector<Edge*> GetActiveEdges();
@@ -574,8 +622,11 @@ void BuildTest::RebuildTarget(const string& target, const char* manifest,
   builder.command_runner_.release();
 }
 
-bool FakeCommandRunner::CanRunMore() const {
-  return active_edges_.size() < max_active_edges_;
+size_t FakeCommandRunner::CanRunMore() const {
+  if (active_edges_.size() < max_active_edges_)
+    return SIZE_MAX;
+
+  return 0;
 }
 
 bool FakeCommandRunner::StartCommand(Edge* edge) {
@@ -986,9 +1037,19 @@ TEST_F(BuildTest, DepFileOK) {
   ASSERT_EQ(1u, fs_.files_read_.size());
   EXPECT_EQ("foo.o.d", fs_.files_read_[0]);
 
-  // Expect three new edges: one generating foo.o, and two more from
-  // loading the depfile.
-  ASSERT_EQ(orig_edges + 3, (int)state_.edges_.size());
+  // Expect one new edge generating foo.o. Loading the depfile should have
+  // added nodes, but not phony edges to the graph.
+  ASSERT_EQ(orig_edges + 1, (int)state_.edges_.size());
+
+  // Verify that nodes for blah.h and bar.h were added and that they
+  // are marked as generated by a dep loader.
+  ASSERT_FALSE(state_.LookupNode("foo.o")->generated_by_dep_loader());
+  ASSERT_FALSE(state_.LookupNode("foo.c")->generated_by_dep_loader());
+  ASSERT_TRUE(state_.LookupNode("blah.h"));
+  ASSERT_TRUE(state_.LookupNode("blah.h")->generated_by_dep_loader());
+  ASSERT_TRUE(state_.LookupNode("bar.h"));
+  ASSERT_TRUE(state_.LookupNode("bar.h")->generated_by_dep_loader());
+
   // Expect our edge to now have three inputs: foo.c and two headers.
   ASSERT_EQ(3u, edge->inputs_.size());
 
@@ -1154,7 +1215,6 @@ TEST_F(BuildTest, DepFileCanonicalize) {
   ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
 "rule cc\n  command = cc $in\n  depfile = $out.d\n"
 "build gen/stuff\\things/foo.o: cc x\\y/z\\foo.c\n"));
-  Edge* edge = state_.edges_.back();
 
   fs_.Create("x/y/z/foo.c", "");
   GetNode("bar.h")->MarkDirty();  // Mark bar.h as missing.
@@ -1167,10 +1227,10 @@ TEST_F(BuildTest, DepFileCanonicalize) {
   // The depfile path does not get Canonicalize as it seems unnecessary.
   EXPECT_EQ("gen/stuff\\things/foo.o.d", fs_.files_read_[0]);
 
-  // Expect three new edges: one generating foo.o, and two more from
-  // loading the depfile.
-  ASSERT_EQ(orig_edges + 3, (int)state_.edges_.size());
+  // Expect one new edge enerating foo.o.
+  ASSERT_EQ(orig_edges + 1, (int)state_.edges_.size());
   // Expect our edge to now have three inputs: foo.c and two headers.
+  Edge* edge = state_.edges_.back();
   ASSERT_EQ(3u, edge->inputs_.size());
 
   // Expect the command line we generate to only use the original input, and
@@ -2197,11 +2257,28 @@ TEST_F(BuildTest, DepsGccWithEmptyDepfileErrorsOut) {
   ASSERT_EQ(1u, command_runner_.commands_ran_.size());
 }
 
-TEST_F(BuildTest, StatusFormatElapsed) {
+TEST_F(BuildTest, StatusFormatElapsed_e) {
   status_.BuildStarted();
   // Before any task is done, the elapsed time must be zero.
-  EXPECT_EQ("[%/e0.000]",
-            status_.FormatProgressStatus("[%%/e%e]", 0));
+  EXPECT_EQ("[%/e0.000]", status_.FormatProgressStatus("[%%/e%e]", 0));
+}
+
+TEST_F(BuildTest, StatusFormatElapsed_w) {
+  status_.BuildStarted();
+  // Before any task is done, the elapsed time must be zero.
+  EXPECT_EQ("[%/e00:00]", status_.FormatProgressStatus("[%%/e%w]", 0));
+}
+
+TEST_F(BuildTest, StatusFormatETA) {
+  status_.BuildStarted();
+  // Before any task is done, the ETA time must be unknown.
+  EXPECT_EQ("[%/E?]", status_.FormatProgressStatus("[%%/E%E]", 0));
+}
+
+TEST_F(BuildTest, StatusFormatTimeProgress) {
+  status_.BuildStarted();
+  // Before any task is done, the percentage of elapsed time must be zero.
+  EXPECT_EQ("[%/p  0%]", status_.FormatProgressStatus("[%%/p%p]", 0));
 }
 
 TEST_F(BuildTest, StatusFormatReplacePlaceholder) {
@@ -2968,9 +3045,9 @@ TEST_F(BuildWithDepsLogTest, DepFileOKDepsLog) {
     EXPECT_TRUE(builder.AddTarget("fo o.o", &err));
     ASSERT_EQ("", err);
 
-    // Expect three new edges: one generating fo o.o, and two more from
-    // loading the depfile.
-    ASSERT_EQ(3u, state.edges_.size());
+    // Expect one new edge generating fo o.o, loading the depfile should
+    // not generate new edges.
+    ASSERT_EQ(1u, state.edges_.size());
     // Expect our edge to now have three inputs: foo.c and two headers.
     ASSERT_EQ(3u, edge->inputs_.size());
 
@@ -3110,16 +3187,14 @@ TEST_F(BuildWithDepsLogTest, DepFileDepsLogCanonicalize) {
     Builder builder(&state, config_, NULL, &deps_log, &fs_, &status_, 0);
     builder.command_runner_.reset(&command_runner_);
 
-    Edge* edge = state.edges_.back();
-
     state.GetNode("bar.h", 0)->MarkDirty();  // Mark bar.h as missing.
     EXPECT_TRUE(builder.AddTarget("a/b/c/d/e/fo o.o", &err));
     ASSERT_EQ("", err);
 
-    // Expect three new edges: one generating fo o.o, and two more from
-    // loading the depfile.
-    ASSERT_EQ(3u, state.edges_.size());
+    // Expect one new edge generating fo o.o.
+    ASSERT_EQ(1u, state.edges_.size());
     // Expect our edge to now have three inputs: foo.c and two headers.
+    Edge* edge = state.edges_.back();
     ASSERT_EQ(3u, edge->inputs_.size());
 
     // Expect the command line we generate to only use the original input.
@@ -3675,8 +3750,8 @@ TEST_F(BuildTest, DyndepBuildDiscoverOutputAndDepfileInput) {
   EXPECT_TRUE(builder_.AddTarget("out", &err));
   ASSERT_EQ("", err);
 
-  // Loading the depfile gave tmp.imp a phony input edge.
-  ASSERT_TRUE(GetNode("tmp.imp")->in_edge()->is_phony());
+  // Loading the depfile did not give tmp.imp a phony input edge.
+  ASSERT_FALSE(GetNode("tmp.imp")->in_edge());
 
   EXPECT_TRUE(builder_.Build(&err));
   EXPECT_EQ("", err);
