@@ -1382,7 +1382,7 @@ int NinjaMain::RunBuild(int argc, char** argv, Status* status) {
   if (!builder.Build(&err)) {
     status->Info("build stopped: %s.", err.c_str());
     if (err.find("interrupted by user") != string::npos) {
-      return 2;
+      return 130;
     }
     return 1;
   }
@@ -1540,7 +1540,7 @@ NORETURN void real_main(int argc, char** argv) {
   if (exit_code >= 0)
     exit(exit_code);
 
-  Status* status = new StatusPrinter(config);
+  Status* status = Status::factory(config);
 
   if (options.working_dir) {
     // The formatting of this string, complete with funny quotes, is
