@@ -236,29 +236,17 @@ void StatusPrinter::BuildEdgeFinished(Edge* edge, int64_t start_time_millis,
 
 #ifdef _WIN32
     // Fix extra CR being added on Windows, writing out CR CR LF (#773)
-    _setmode(_fileno(stdout), _O_BINARY);  // Begin Windows extra CR fix
+    fflush(stdout);  // Begin Windows extra CR fix
+    _setmode(_fileno(stdout), _O_BINARY);
 #endif
 
     printer_.PrintOnNewLine(final_output);
 
 #ifdef _WIN32
+    fflush(stdout);
     _setmode(_fileno(stdout), _O_TEXT);  // End Windows extra CR fix
 #endif
   }
-}
-
-void StatusPrinter::BuildLoadDyndeps() {
-  // The DependencyScan calls EXPLAIN() to print lines explaining why
-  // it considers a portion of the graph to be out of date.  Normally
-  // this is done before the build starts, but our caller is about to
-  // load a dyndep file during the build.  Doing so may generate more
-  // explanation lines (via fprintf directly to stderr), but in an
-  // interactive console the cursor is currently at the end of a status
-  // line.  Start a new line so that the first explanation does not
-  // append to the status line.  After the explanations are done a
-  // new build status line will appear.
-  if (g_explaining)
-    printer_.PrintOnNewLine("");
 }
 
 void StatusPrinter::BuildStarted() {
@@ -417,6 +405,22 @@ string StatusPrinter::FormatProgressStatus(const char* progress_status_format,
 }
 
 void StatusPrinter::PrintStatus(const Edge* edge, int64_t time_millis) {
+  if (explanations_) {
+    // Collect all explanations for the current edge's outputs.
+    std::vector<std::string> explanations;
+    for (Node* output : edge->outputs_) {
+      explanations_->LookupAndAppend(output, &explanations);
+    }
+    if (!explanations.empty()) {
+      // Start a new line so that the first explanation does not append to the
+      // status line.
+      printer_.PrintOnNewLine("");
+      for (const auto& exp : explanations) {
+        fprintf(stderr, "ninja explain: %s\n", exp.c_str());
+      }
+    }
+  }
+
   if (config_.verbosity == BuildConfig::QUIET
       || config_.verbosity == BuildConfig::NO_STATUS_UPDATE)
     return;
