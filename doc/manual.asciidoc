@@ -786,7 +786,7 @@ A file is a series of declarations.  A declaration can be one of:
    Order-only dependencies may be tacked on the end with +||
    _dependency1_ _dependency2_+.  (See <<ref_dependencies,the reference on
    dependency types>>.)
-   Validations may be taked on the end with +|@ _validation1_ _validation2_+.
+   Validations may be taken on the end with +|@ _validation1_ _validation2_+.
    (See <<validations,the reference on validations>>.)
 +
 Implicit outputs _(available since Ninja 1.7)_ may be added before
@@ -1025,8 +1025,8 @@ source file of a compile command.
 +
 This is for expressing dependencies that don't show up on the
 command line of the command; for example, for a rule that runs a
-script that reads a hardcoded file, the hardcoded file should 
-be an implicit dependency, as changes to the file should cause 
+script that reads a hardcoded file, the hardcoded file should
+be an implicit dependency, as changes to the file should cause
 the output to rebuild, even though it doesn't show up in the arguments.
 +
 Note that dependencies as loaded through depfiles have slightly different

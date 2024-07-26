@@ -13,6 +13,7 @@ check_ipo_supported(RESULT lto_supported OUTPUT error)
 
 if(lto_supported)
 	message(STATUS "IPO / LTO enabled")
+	set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
 	set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 else()
 	message(STATUS "IPO / LTO not supported: <${error}>")
@@ -32,9 +33,13 @@ else()
 	if(flag_no_deprecated)
 		add_compile_options(-Wno-deprecated)
 	endif()
-	check_cxx_compiler_flag(-fdiagnostics-color flag_color_diag)
-	if(flag_color_diag)
-		add_compile_options(-fdiagnostics-color)
+	if(CMAKE_VERSION VERSION_LESS 3.24)
+		check_cxx_compiler_flag(-fdiagnostics-color flag_color_diag)
+		if(flag_color_diag)
+			add_compile_options(-fdiagnostics-color)
+		endif()
+	elseif(NOT DEFINED ENV{CMAKE_COLOR_DIAGNOSTICS})
+		set(CMAKE_COLOR_DIAGNOSTICS ON)
 	endif()
 
 	if(NOT NINJA_FORCE_PSELECT)
@@ -158,6 +163,11 @@ if(WIN32)
 	# so that build environments which lack a C compiler, but have a C++
 	# compiler may build ninja.
 	set_source_files_properties(src/getopt.c PROPERTIES LANGUAGE CXX)
+
+	# windows.h defines min() and max() which conflict with std::min()
+	# and std::max(), which both might be used in sources. Avoid compile
+	# errors by telling windows.h to not define those two.
+	add_compile_definitions(NOMINMAX)
 else()
 	target_sources(libninja PRIVATE src/subprocess-posix.cc)
 	if(CMAKE_SYSTEM_NAME STREQUAL "OS400" OR CMAKE_SYSTEM_NAME STREQUAL "AIX")
@@ -227,42 +237,21 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+
+  # Can be removed if cmake min version is >=3.24
+  if (POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+  endif()
+
   find_package(GTest)
   if(NOT GTest_FOUND)
     include(FetchContent)
     FetchContent_Declare(
       googletest
-      URL https://github.com/google/googletest/archive/release-1.10.0.tar.gz
-      URL_HASH SHA1=9c89be7df9c5e8cb0bc20b3c4b39bf7e82686770
+      URL https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz
+      URL_HASH SHA256=81964fe578e9bd7c94dfdb09c8e4d6e6759e19967e397dbea48d1c10e45d0df2
     )
     FetchContent_MakeAvailable(googletest)
-
-    # Before googletest-1.11.0, the CMake files provided by the source archive
-    # did not define the GTest::gtest target, only the gtest one, so define
-    # an alias when needed to ensure the rest of this file works with all
-    # GoogleTest releases.
-    #
-    # Note that surprisingly, this is not needed when using GTEST_ROOT to
-    # point to a local installation, because this one contains CMake-generated
-    # files that contain the right target definition, and which will be
-    # picked up by the find_package(GTest) file above.
-    #
-    # This comment and the four lines below can be removed once Ninja only
-    # depends on release-1.11.0 or above.
-    if (NOT TARGET GTest::gtest)
-      message(STATUS "Defining GTest::gtest alias to work-around bug in older release.")
-      add_library(GTest::gtest ALIAS gtest)
-
-      # NOTE: gtest uninit some variables, gcc >= 1.11.3 may cause error on compile.
-      # Remove this comment and six lines below, once ninja deps gtest-1.11.0 or above.
-      if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "1.11.3")
-        check_cxx_compiler_flag(-Wmaybe-uninitialized flag_maybe_uninit)
-        if (flag_maybe_uninit)
-          target_compile_options(gtest PRIVATE -Wno-maybe-uninitialized)
-        endif()
-      endif()
-
-    endif()
   endif()
 
   # Tests all build into ninja_test executable.
@@ -276,6 +265,7 @@ if(BUILD_TESTING)
     src/disk_interface_test.cc
     src/dyndep_parser_test.cc
     src/edit_distance_test.cc
+    src/explanations_test.cc
     src/graph_test.cc
     src/json_test.cc
     src/lexer_test.cc
@@ -291,6 +281,11 @@ if(BUILD_TESTING)
   if(WIN32)
     target_sources(ninja_test PRIVATE src/includes_normalize_test.cc src/msvc_helper_test.cc
       windows/ninja.manifest)
+
+    if(MSVC)
+      # Silence warnings about using unlink rather than _unlink
+      target_compile_definitions(ninja_test PRIVATE _CRT_NONSTDC_NO_DEPRECATE)
+    endif()
   endif()
   find_package(Threads REQUIRED)
   target_link_libraries(ninja_test PRIVATE libninja libninja-re2c GTest::gtest Threads::Threads)
