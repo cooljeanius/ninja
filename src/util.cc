@@ -26,6 +26,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <regex>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,7 +48,7 @@
 #include <sys/loadavg.h>
 #elif defined(_AIX) && !defined(__PASE__)
 #include <libperfstat.h>
-#elif defined(linux) || defined(__GLIBC__)
+#elif defined(__linux__) || defined(__GLIBC__)
 #include <sys/sysinfo.h>
 #include <fstream>
 #include <map>
@@ -589,7 +590,7 @@ string StripAnsiEscapeCodes(const string& in) {
   return stripped;
 }
 
-#if defined(linux) || defined(__GLIBC__)
+#if defined(__linux__) || defined(__GLIBC__)
 std::pair<int64_t, bool> readCount(const std::string& path) {
   std::ifstream file(path.c_str());
   if (!file.is_open())
@@ -789,7 +790,7 @@ int GetProcessorCount() {
 #else
   int cgroupCount = -1;
   int schedCount = -1;
-#if defined(linux) || defined(__GLIBC__)
+#if defined(__linux__) || defined(__GLIBC__)
   cgroupCount = ParseCPUFromCGroup();
 #endif
   // The number of exposed processors might not represent the actual number of
@@ -925,14 +926,43 @@ string ElideMiddle(const string& str, size_t width) {
       case 3: return "...";
   }
   const int kMargin = 3;  // Space for "...".
-  string result = str;
-  if (result.size() > width) {
-    size_t elide_size = (width - kMargin) / 2;
-    result = result.substr(0, elide_size)
-      + "..."
-      + result.substr(result.size() - elide_size, elide_size);
+  const static std::regex ansi_escape("\\x1b[^m]*m");
+  std::string result = std::regex_replace(str, ansi_escape, "");
+  if (result.size() <= width) {
+    return str;
   }
-  return result;
+  int32_t elide_size = (width - kMargin) / 2;
+
+  std::vector<std::pair<int32_t, std::string>> escapes;
+  size_t added_len = 0;  // total number of characters
+
+  std::sregex_iterator it(str.begin(), str.end(), ansi_escape);
+  std::sregex_iterator end;
+  while (it != end) {
+    escapes.emplace_back(it->position() - added_len, it->str());
+    added_len += it->str().size();
+    ++it;
+  }
+
+  std::string new_status =
+      result.substr(0, elide_size) + "..." +
+      result.substr(result.size() - elide_size - ((width - kMargin) % 2));
+
+  added_len = 0;
+  // We need to put all ANSI escape codes back in:
+  for (const auto& escape : escapes) {
+    int32_t pos = escape.first;
+    if (pos > elide_size) {
+      pos -= result.size() - width;
+      if (pos < static_cast<int32_t>(width) - elide_size) {
+        pos = width - elide_size - (width % 2 == 0 ? 1 : 0);
+      }
+    }
+    pos += added_len;
+    new_status.insert(pos, escape.second);
+    added_len += escape.second.size();
+  }
+  return new_status;
 }
 
 bool Truncate(const string& path, size_t size, string* err) {

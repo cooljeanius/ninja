@@ -13,8 +13,10 @@
 // limitations under the License.
 #pragma once
 
+#include <cstdint>
 #include <queue>
 
+#include "explanations.h"
 #include "line_printer.h"
 #include "status.h"
 
@@ -31,7 +33,6 @@ struct StatusPrinter : Status {
   virtual void BuildEdgeFinished(Edge* edge, int64_t start_time_millis,
                                  int64_t end_time_millis, bool success,
                                  const std::string& output);
-  virtual void BuildLoadDyndeps();
   virtual void BuildStarted();
   virtual void BuildFinished();
 
@@ -48,6 +49,11 @@ struct StatusPrinter : Status {
   /// @param status The status of the edge.
   std::string FormatProgressStatus(const char* progress_status_format,
                                    int64_t time_millis) const;
+
+  /// Set the |explanations_| pointer. Used to implement `-d explain`.
+  void SetExplanations(Explanations* explanations) override {
+    explanations_ = explanations;
+  }
 
  private:
   void PrintStatus(const Edge* edge, int64_t time_millis);
@@ -82,6 +88,9 @@ struct StatusPrinter : Status {
 
   /// Prints progress output.
   LinePrinter printer_;
+
+  /// An optional Explanations pointer, used to implement `-d explain`.
+  Explanations* explanations_ = nullptr;
 
   /// The custom progress status format to use.
   const char* progress_status_format_;

@@ -19,6 +19,7 @@
 
 struct BuildConfig;
 struct Edge;
+struct Explanations;
 
 /// Abstract interface to object that tracks the status of a build:
 /// completion fraction, printing updates.
@@ -30,9 +31,13 @@ struct Status {
   virtual void BuildEdgeFinished(Edge* edge, int64_t start_time_millis,
                                  int64_t end_time_millis, bool success,
                                  const std::string& output) = 0;
-  virtual void BuildLoadDyndeps() = 0;
   virtual void BuildStarted() = 0;
   virtual void BuildFinished() = 0;
+
+  /// Set the Explanations instance to use to report explanations,
+  /// argument can be nullptr if no explanations need to be printed
+  /// (which is the default).
+  virtual void SetExplanations(Explanations*) = 0;
 
   virtual void Info(const char* msg, ...) = 0;
   virtual void Warning(const char* msg, ...) = 0;
